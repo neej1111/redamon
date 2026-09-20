@@ -678,11 +678,41 @@ Cypher Query:"""
         logger.info(f"Setting up Neo4j connection to {self.uri}")
 
         try:
-            self.graph = Neo4jGraph(
-                url=self.uri,
-                username=self.user,
-                password=self.password
-            )
+            # Neo4jGraph() connects EAGERLY (it reads the schema on construction), so a
+            # transient failure here silently deleted the agent's entire graph access:
+            # get_tool() returned None, PhaseAwareToolExecutor captured that None at
+            # construction, and nothing ever retried -- the process then ran its whole
+            # life with `tools_loaded: 28` instead of 29 and every query_graph call
+            # answered "Tool 'query_graph' not found".
+            #
+            # The failure is load-induced, not a cold-start race: it reproduces when the
+            # agent container starts WHILE the Knowledge Base ingestion (which runs inside
+            # this same container) is writing thousands of KBChunk nodes into Neo4j, and
+            # also reproduced during a recon run that had just written ~2,200 Port nodes.
+            # Retry with backoff before concluding the graph is unavailable.
+            import time as _time
+            _last_err: Optional[Exception] = None
+            for _attempt in range(1, 6):
+                try:
+                    self.graph = Neo4jGraph(
+                        url=self.uri,
+                        username=self.user,
+                        password=self.password
+                    )
+                    break
+                except Exception as _e:  # noqa: BLE001 - shape reported below
+                    _last_err = _e
+                    logger.warning(
+                        f"Neo4j connect attempt {_attempt}/5 failed "
+                        f"({type(_e).__name__}: {_e}); retrying in 3s"
+                    )
+                    _time.sleep(3)
+            if self.graph is None:
+                logger.error(
+                    "Neo4j unreachable after 5 attempts; query_graph will NOT be "
+                    f"registered for this process (last error: {_last_err})"
+                )
+                return None
 
             # Store reference to self for use in the tool closure
             manager = self

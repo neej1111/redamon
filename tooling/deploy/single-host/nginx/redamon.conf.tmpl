@@ -80,7 +80,7 @@ server {
                text/javascript application/xml image/svg+xml;
 
     # DoS / slowloris protections
-    limit_conn conn 20;
+    limit_conn conn 100;
     client_body_timeout 15s; client_header_timeout 15s; send_timeout 15s; keepalive_timeout 20s;
     large_client_header_buffers 8 32k;
     client_max_body_size 60m;             # 50MB wordlist upload is the largest app-enforced cap
@@ -109,7 +109,7 @@ server {
     # ---- Agent WebSocket endpoints ONLY (nothing else on :8090 is proxied) ----
     location ~ ^/ws/(agent|kali-terminal|cypherfix-triage|cypherfix-codefix)$ {
         __WS_AUTH_REQUEST__
-        limit_conn conn 20;
+        limit_conn conn 100;
         include /etc/nginx/snippets/redamon-proxy-common.conf;
         proxy_pass http://127.0.0.1:8090;
         proxy_set_header Upgrade $http_upgrade;

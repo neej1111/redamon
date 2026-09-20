@@ -43,7 +43,14 @@ embedder:
   model: intfloat/e5-large-v2
   # Encode batch size during ingestion. 32 is safe; 64 is ~30% faster on hosts
   # with > 8 GB RAM headroom.
-  batch_size: 64
+  #
+  # NOTE: the lite/full ingestion runs INSIDE the agent container (Makefile
+  # MODE=docker -> `docker exec redamon-agent`), so this batch is bounded by
+  # that container's mem_limit (AGENT_MEM, default 3g), NOT by host RAM.
+  # batch_size 64 against a 3g cap is SIGKILLed mid-ingest as `make: Error 137`
+  # (cgroup OOM, no kernel oom-kill line) after thousands of chunks are already
+  # written. 32 assumes AGENT_MEM >= 6g; lower it if you cap the agent tighter.
+  batch_size: 32
   # Override at runtime: KB_EMBEDDING_MODEL=...
 
 

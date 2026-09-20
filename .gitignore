@@ -280,3 +280,6 @@ testing/guinea_pigs/supply_chain_target/.dryrun/
 
 # rushes demo-video skill: browser session state is a bearer credential
 .rushes/
+
+# Kilo agent state (extension uninstalled 2026-09)
+.kilo/

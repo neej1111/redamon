@@ -1202,6 +1202,14 @@ services:
     # stripped in the image instead (capture_proxy/Dockerfile).
     mem_limit: ${CAPTURE_PROXY_MEM:-384m}   # sized from host RAM by redamon.sh
     pids_limit: 256
+    # mitmproxy opens 2+ fds per live connection and the default container
+    # nofile is 1024, which surfaced as `OSError: [Errno 24] Too many open
+    # files` (852 unhandled task errors in one 6h window) that silently
+    # killed intercepts. Raise it well above any realistic connection count.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     restart: "no"
 
   traffic-ingest:

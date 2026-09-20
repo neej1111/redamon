@@ -24,7 +24,7 @@ server {
     include /etc/nginx/snippets/redamon-security-headers.conf;
     add_header __CSP_HEADER_NAME__ "default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' __CSP_CONNECT__; worker-src 'self' blob:; manifest-src 'self'" always;
 
-    limit_conn conn 20;
+    limit_conn conn 100;
     client_body_timeout 15s; client_header_timeout 15s; send_timeout 15s; keepalive_timeout 20s;
     large_client_header_buffers 8 32k;
     # Compress JSON. Ubuntu's stock nginx.conf ships `gzip on` with EVERY
@@ -61,7 +61,7 @@ server {
 
     location ~ ^/ws/(agent|kali-terminal|cypherfix-triage|cypherfix-codefix)$ {
         __WS_AUTH_REQUEST__
-        limit_conn conn 20;
+        limit_conn conn 100;
         include /etc/nginx/snippets/redamon-proxy-common.conf;
         proxy_pass http://127.0.0.1:8090;
         proxy_set_header Upgrade $http_upgrade;

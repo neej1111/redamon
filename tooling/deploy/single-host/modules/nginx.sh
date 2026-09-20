@@ -67,6 +67,15 @@ _render_template() {
   gate="$(_gate_block)"
   acme="$(_acme_block)"
   while IFS= read -r line || [[ -n "$line" ]]; do
+    # Tolerate CRLF templates. A Windows checkout (or any clone without an
+    # .gitattributes eol=lf rule for nginx/**, as this repo has none) leaves a
+    # trailing \r on every line. That silently defeats the EXACT-match branch
+    # below -- "__ACME_BLOCK__" != "__ACME_BLOCK__\r" -- so the token ships
+    # verbatim into the site file and `nginx -t` dies with
+    #   unknown directive "__ACME_BLOCK__"
+    # Every other token survives CRLF because it is replaced with a wildcard
+    # ${line//token/value} substitution; only this branch compares whole lines.
+    line="${line%$'\r'}"
     case "$line" in
       *"# __GATE__"*)   printf '%s\n' "${gate}" ;;
       "__ACME_BLOCK__") printf '%s\n' "${acme}" ;;

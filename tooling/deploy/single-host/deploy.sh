@@ -267,8 +267,8 @@ precheck_target() {
 }
 
   SSH_CONTROL_PATH="/tmp/ssh-redamon-${HOST_IP}-$$"
-  local common="-p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=8 -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_PATH} -o ControlPersist=120"
-  local scp_common="-P ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_PATH} -o ControlPersist=120"
+  local common="-p ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=8 -o ControlMaster=no -o ControlPath=${SSH_CONTROL_PATH} -o ControlPersist=120"
+  local scp_common="-P ${SSH_PORT} -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o ControlPath=${SSH_CONTROL_PATH} -o ControlPersist=120"
   if [[ "${AUTH_MODE}" == "key" ]]; then
     SSH="ssh ${common} -i ${PEM} ${REMOTE_USER}@${HOST_IP}"
     SCP="scp -q ${scp_common} -i ${PEM}"
