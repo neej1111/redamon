@@ -232,7 +232,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
   // Step 2: Configure
   const ptype = form.providerType as ProviderType
   const providerDef = PROVIDER_TYPES.find(p => p.id === ptype)
-  const isKeyBased = ['openai', 'anthropic', 'openrouter', 'deepseek', 'gemini', 'glm', 'kimi', 'qwen', 'xai', 'mistral'].includes(ptype)
+  const isKeyBased = ['openai', 'anthropic', 'openrouter', 'deepseek', 'gemini', 'glm', 'kimi', 'qwen', 'xai', 'mistral', 'nvidia', 'arliai'].includes(ptype)
   const isBedrock = ptype === 'bedrock'
   const isCompat = ptype === 'openai_compatible'
   const apiKeyUrl = providerDef?.apiKeyUrl

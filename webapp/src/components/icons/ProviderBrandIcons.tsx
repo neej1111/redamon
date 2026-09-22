@@ -63,3 +63,11 @@ export const SiXai = (props: IconProps) => (
 export const SiMistral = (props: IconProps) => (
   <BrandSvg {...props} title={props.title ?? 'Mistral AI'} path={MISTRAL_PATH} />
 )
+
+export const SiNvidia = (props: IconProps) => (
+  <BrandSvg {...props} title={props.title ?? 'NVIDIA'} path={NVIDIA_PATH} />
+)
+
+export const SiArliai = (props: IconProps) => (
+  <BrandSvg {...props} title={props.title ?? 'Arliai'} path={ARLIAI_PATH} />
+)
