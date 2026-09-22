@@ -13,12 +13,17 @@
 # so those client headers are stripped (redamon-proxy-common.conf).
 #
 # Tokens: __SERVER_NAME__ __SSL_CERT_REMOTE__ __SSL_KEY_REMOTE__ __CSP_CONNECT__
-#         __ACME_BLOCK__ __GATE__ __HTTP_PORT__ __HTTPS_PORT__ __REDIRECT_HOST__
+#         __ACME_BLOCK__ __GATE__ __MCP_GATE__ __HTTP_PORT__ __HTTPS_PORT__
+#         __REDIRECT_HOST__
 #         __CSP_HEADER_NAME__ __WS_AUTH_REQUEST__
 
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
 limit_req_zone $binary_remote_addr zone=api:10m   rate=30r/s;
+# Inbound MCP server. Its own zone so an external agent's bursts do not consume
+# the UI's budget (and vice versa); the real per-caller limit is in-route, keyed
+# on the TOKEN, because one agent behind one NAT is one caller.
+limit_req_zone $binary_remote_addr zone=mcp:10m   rate=10r/s;
 limit_conn_zone $binary_remote_addr zone=conn:10m;
 # NB: server_tokens is set per-server (below), NOT here at http level -- some base
 # nginx.conf files ship an active `server_tokens` in http{}, and a second one here
@@ -129,6 +134,40 @@ server {
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy strict-origin-when-cross-origin always;
         add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet" always;
+        add_header Cache-Control "no-store" always;
+    }
+    # Inbound MCP server. EXACT match (`location = `): a prefix block written as
+    # `/api/mcp-server/` does NOT match the endpoint URL `/api/mcp-server`, and
+    # the request would silently fall back to `location /api/` below - with the
+    # UI rate zone and, under GATE_MODE=basic_auth, a gate that eats the
+    # Authorization header the client needs.
+    location = /api/mcp-server {
+        limit_req zone=mcp burst=20 nodelay; limit_req_status 429;
+        # Log rate-limiting at warn, not error. The stock fail2ban
+        # `nginx-limit-req` filter anchors on "[error] ... limiting requests",
+        # and an MCP client legitimately bursts (initialize, tools/list, a
+        # fan-out of parallel calls). At error level eleven of those in a minute
+        # firewall-ban the client for 10 minutes -- taking the operator's own
+        # browser with it when they share an egress IP. Credential abuse is
+        # caught by the redamon-mcp-auth jail instead, which bans on repeated
+        # 401s and cannot fire on a merely-fast client.
+        limit_req_log_level warn;
+        # A tool call is a small JSON-RPC envelope. The route caps the body at
+        # 64 KiB, but proxy_request_buffering is on by default, so without this
+        # nginx would buffer up to the server-level 60m FIRST and only then let
+        # the app reject it.
+        client_max_body_size 64k;
+        # __MCP_GATE__
+        include /etc/nginx/snippets/redamon-proxy-common.conf;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_read_timeout 3600s; proxy_buffering off;
+        # A location with any add_header stops inheriting the server-level ones,
+        # so the whole set is re-stated. Via the shared snippet, never by hand:
+        # hand-copying is what let the login block lose Permissions-Policy, COOP
+        # and CORP. HSTS/CSP are template-level and are re-emitted explicitly.
+        include /etc/nginx/snippets/redamon-security-headers-only.conf;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+        add_header __CSP_HEADER_NAME__ "default-src 'none'; frame-ancestors 'none'" always;
         add_header Cache-Control "no-store" always;
     }
     location /api/ {

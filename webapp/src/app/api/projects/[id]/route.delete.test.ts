@@ -14,6 +14,8 @@ const h = vi.hoisted(() => ({
   capturedFindMany: vi.fn(),
   orchestratorFetch: vi.fn(),
   effectiveUser: vi.fn(),
+  countAuthorizations: vi.fn(),
+  archiveTransaction: vi.fn(),
 }))
 
 vi.mock('@/lib/prisma', () => ({
@@ -21,6 +23,10 @@ vi.mock('@/lib/prisma', () => ({
     project: { delete: (...a: unknown[]) => h.projectDelete(...a) },
     jobQueue: { updateMany: (...a: unknown[]) => h.jobQueueUpdateMany(...a) },
     capturedHttpTransaction: { findMany: (...a: unknown[]) => h.capturedFindMany(...a) },
+    // The authorization records do NOT cascade: they are archived first, so
+    // deleting a project cannot destroy the record of what authorized it.
+    engagementAuthorization: { count: (...a: unknown[]) => h.countAuthorizations(...a) },
+    $transaction: (fn: (tx: unknown) => unknown) => h.archiveTransaction(fn),
   },
 }))
 vi.mock('@/app/api/graph/neo4j', () => ({ getGraphSession: () => ({ run: vi.fn(), close: vi.fn() }) }))
@@ -42,6 +48,40 @@ beforeEach(() => {
   h.jobQueueUpdateMany.mockResolvedValue({ count: 2 })
   h.capturedFindMany.mockResolvedValue([])
   h.orchestratorFetch.mockResolvedValue({ ok: true, json: async () => ({ deleted: [] }) })
+  h.countAuthorizations.mockResolvedValue(0)
+  h.archiveTransaction.mockImplementation(async (fn: (tx: unknown) => unknown) =>
+    fn({ $executeRawUnsafe: async () => 1 })
+  )
+})
+
+describe('the record of what authorized an engagement outlives the engagement', () => {
+  // Every OTHER Project child cascades. These do not, because deleting a
+  // project is exactly when the record of what authorized it stops being
+  // recoverable, and that is the thing an incident review needs most.
+  test('a project with no records deletes without touching the archive', async () => {
+    h.countAuthorizations.mockResolvedValue(0)
+    expect((await DELETE(del(), params('p1'))).status).toBe(200)
+    expect(h.archiveTransaction).not.toHaveBeenCalled()
+  })
+
+  test('a project WITH records archives them first', async () => {
+    h.countAuthorizations.mockResolvedValue(2)
+    expect((await DELETE(del(), params('p1'))).status).toBe(200)
+    expect(h.archiveTransaction).toHaveBeenCalled()
+    // Archived BEFORE the delete: the foreign key is Restrict, so the other
+    // order would simply fail.
+    expect(h.archiveTransaction.mock.invocationCallOrder[0])
+      .toBeLessThan(h.projectDelete.mock.invocationCallOrder[0])
+  })
+
+  test('a failed archive refuses the delete rather than losing the records', async () => {
+    h.countAuthorizations.mockResolvedValue(2)
+    h.archiveTransaction.mockRejectedValue(new Error('archive table missing'))
+    const res = await DELETE(del(), params('p1'))
+    expect(res.status).toBe(500)
+    expect((await res.json()).error).toMatch(/must outlive/)
+    expect(h.projectDelete).not.toHaveBeenCalled()
+  })
 })
 
 test('cancels non-terminal queue rows before deleting the project (C-7)', async () => {

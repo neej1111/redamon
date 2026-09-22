@@ -110,14 +110,25 @@ IMAGES=(
     "dolevf/graphql-cop:1.14"
     "ghcr.io/zaproxy/zaproxy:stable"
     "redamon-wcvs:latest"
+    # Locally built, like WCVS. It was absent from this list entirely, so a
+    # missing baddns image was discovered mid-scan rather than at startup where
+    # every other tool's is.
+    "redamon-baddns:latest"
 )
 
 for IMAGE in "${IMAGES[@]}"; do
     if docker images -q "$IMAGE" 2>/dev/null | grep -q .; then
         echo -e "${GREEN}[+] $IMAGE already pulled${NC}"
     elif [[ "$IMAGE" == redamon-* ]]; then
-        # Locally-built image (e.g. WCVS) — never pull from a registry.
-        echo -e "${YELLOW}[!] $IMAGE not found locally — build with: docker compose --profile tools build wcvs${NC}"
+        # Locally-built image (WCVS, BadDNS) — never pull from a registry.
+        # The compose SERVICE name is not the image name, so it is looked up
+        # rather than derived: `redamon-baddns` builds from `baddns-scanner`.
+        case "$IMAGE" in
+            redamon-wcvs:*)   SERVICE="wcvs" ;;
+            redamon-baddns:*) SERVICE="baddns-scanner" ;;
+            *)                SERVICE="${IMAGE#redamon-}"; SERVICE="${SERVICE%%:*}" ;;
+        esac
+        echo -e "${YELLOW}[!] $IMAGE not found locally — build with: docker compose --profile tools build ${SERVICE}${NC}"
     else
         echo -e "${YELLOW}[*] Pulling $IMAGE...${NC}"
         if [[ "$IMAGE" == "sxcurity/gau:latest" ]] && [[ "$(uname -m)" =~ ^(arm64|aarch64)$ ]]; then

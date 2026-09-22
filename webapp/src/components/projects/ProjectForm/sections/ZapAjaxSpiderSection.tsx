@@ -8,6 +8,7 @@ import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { TimeEstimate } from '../TimeEstimate'
 import { FileImportButton } from '../FileImportButton'
+import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -311,6 +312,14 @@ export function ZapAjaxSpiderSection({ data, updateField, onRun }: ZapAjaxSpider
               </div>
             </>
           )}
+
+          <RegistryFields
+            keys={['zapAjaxSpiderDockerImage']}
+            data={data}
+            updateField={updateField}
+            title="Advanced"
+            description="Settings this tool accepts that have no dedicated control. Bounds, options and descriptions come from the settings registry, so they are the same ones the API enforces."
+          />
         </div>
       )}
     </div>

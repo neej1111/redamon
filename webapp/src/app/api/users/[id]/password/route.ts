@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { hashPassword, verifyPassword } from '@/lib/auth'
 import { getSession } from '@/lib/session'
+import { writeAudit } from '@/lib/audit'
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -63,12 +64,34 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     const hashed = await hashPassword(newPassword)
 
-    await prisma.user.update({
-      where: { id },
-      data: { password: hashed },
-    })
+    // Any password change revokes every MCP personal access token. An admin can
+    // reset another user's password without knowing the current one (above), so
+    // a reset must not leave live programmatic credentials behind. Same
+    // transaction as the password write: a half-applied reset would be worse
+    // than either outcome.
+    const [, revoked] = await prisma.$transaction([
+      prisma.user.update({
+        where: { id },
+        data: { password: hashed },
+      }),
+      prisma.mcpAccessToken.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ])
 
-    return NextResponse.json({ success: true })
+    if (revoked.count > 0) {
+      await writeAudit({
+        actorId: session.userId,
+        action: 'mcp-token.revoke-all',
+        targetType: 'user',
+        targetId: id,
+        after: { reason: 'password changed', revokedCount: revoked.count, byAdmin: isAdmin && !isSelf },
+        source: 'api',
+      })
+    }
+
+    return NextResponse.json({ success: true, revokedMcpTokens: revoked.count })
   } catch (error) {
     console.error('Failed to change password:', error)
     return NextResponse.json(

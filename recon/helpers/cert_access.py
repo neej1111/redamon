@@ -40,9 +40,18 @@ def _from_tlsx(entry: dict) -> dict:
 
 
 def _from_httpx(cert: dict) -> dict:
+    """Normalise an http_probe certificate.
+
+    httpx computes the same verdicts tlsx does. They are absent only on results
+    captured before http_probe kept them, so fall back to what is derivable and
+    leave the rest None: an unknown verdict must not collapse to False, or a
+    missing answer reads as "healthy" and suppresses a real finding.
+    """
     issuer = cert.get("issuer")
     issuer_str = ", ".join(issuer) if isinstance(issuer, list) else issuer
     san = cert.get("san") or []
+    expired, self_signed, mismatched = (
+        cert.get("expired"), cert.get("self_signed"), cert.get("mismatched"))
     return {
         "source": "http_probe",
         "subject_cn": cert.get("subject_cn"),
@@ -50,9 +59,9 @@ def _from_httpx(cert: dict) -> dict:
         "san": [s for s in san if isinstance(s, str)],
         "not_before": cert.get("not_before"),
         "not_after": cert.get("not_after"),
-        "expired": _is_expired(cert.get("not_after")),
-        "self_signed": None,   # httpx does not compute verdicts
-        "mismatched": None,
+        "expired": bool(expired) if expired is not None else _is_expired(cert.get("not_after")),
+        "self_signed": bool(self_signed) if self_signed is not None else None,
+        "mismatched": bool(mismatched) if mismatched is not None else None,
         "fingerprint_sha256": cert.get("fingerprint_sha256") or cert.get("fingerprint"),
         "probe_status": True,
     }

@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v6.15.0-release-2E8B57?style=flat" alt="Version 6.15.0"/>
+  <img height="24" src="https://img.shields.io/badge/v6.16.3-release-2E8B57?style=flat" alt="Version 6.16.3"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/AI-AUTONOMOUS%20AGENT-6A5ACD?style=flat&logo=openai&logoColor=white" alt="AI Powered"/>
@@ -43,7 +43,7 @@
 
 > **LEGAL DISCLAIMER**: This tool is intended for **authorized security testing**, **educational purposes**, and **research only**. Never use this system to scan, probe, or attack any system you do not own or have explicit written permission to test. Unauthorized access is **illegal** and punishable by law. By using this tool, you accept **full responsibility** for your actions. **[Read Full Disclaimer](DISCLAIMER.md)**
 
-> 🏆 **Flagship result:** RedAmon solves **101 / 104 (97.1%)** of the XBOW web-security benchmark **fully black-box**, the leading open-source black-box score on the corpus. Every solve ships a complete, unedited raw agent session **and** a reproducible, step-by-step walkthrough, a standard none of the higher-scoring claims meet: open any row and read exactly how the flag fell, tool call by tool call. Auditable, line by line. See the **[XBOW Validation Benchmark scorecard](https://github.com/samugit83/redamon/wiki/XBOW-Validation-Benchmark)**.
+> 🏆 **Flagship result:** RedAmon solves **101 / 104 (97.1%)** of the XBOW web-security benchmark **fully black-box**. Every solve ships a complete, unedited raw agent session **and** a reproducible, step-by-step walkthrough: open any row and read exactly how the flag fell, tool call by tool call. Auditable, line by line. See the **[XBOW Validation Benchmark scorecard](https://github.com/samugit83/redamon/wiki/XBOW-Validation-Benchmark)**.
 
 <p align="center">
   <img src="docs/assets/agent.gif" alt="RedAmon Agent Demo" width="100%"/>
@@ -659,6 +659,22 @@ Two paths: pick one of **39 prefilled Quick-Add presets** (OSINT, threat-intel, 
 
 > **Full operator manual** (every form field, all 39 presets, the auth flow, the live discovery workflow, validation rules, troubleshooting, and the storage / security model): **[MCP Tool Plugins wiki page](https://github.com/samugit83/redamon/wiki/MCP-Tool-Plugins)**.
 
+### MCP Server: Your Own Agent Connecting *Into* RedAmon
+
+The mirror image of the plugins above. Instead of RedAmon's agent reaching *out* to tools, **your** agent connects *in* and drives RedAmon: your Claude Code session, an internal triage assistant, a nightly CI job, anything that speaks the Model Context Protocol. Mint an access token in **Global Settings → MCP Server** and it gets **30 tools** behind **9 permissions**: list projects, read scan status and settings, query the attack-surface graph in plain English or raw Cypher, read findings / suppressed findings / remediations, run saved graph views, compare saved scan versions, get an attack-surface overview, exploit paths and blast radius, start / stop / queue a recon run, record a triage verdict, and (off by default, behind three independent switches) run a command in the Kali sandbox.
+
+The token acts as **you**, inside **your own projects**. It is re-checked on every call, so a revoke takes effect on the agent's next call rather than its next reconnect; every graph read is rewritten to match only your tenant's nodes and runs in a read-only Neo4j session; and every write is a positive allowlist. Deliberately not exposed: the agent chat, creating or deleting projects, your API keys, the target and scope fields, Rules of Engagement, muting a finding, and any write to the graph. `MCP_SERVER_ENABLED` is off after a normal install and refused over plain HTTP on a server deploy, and `MCP_DISABLED_TOOLS` withdraws a single misbehaving tool without taking the whole surface down.
+
+#### Agent Onboarding (teaching *your* agent how to use RedAmon)
+
+Connecting an agent tells it *that* the tools exist. It does not tell it what RedAmon is, what the recon pipeline produces, or which of the 30 tools to reach for first. **Agent Onboarding writes those instructions for you.** Pick one of **14 Agent Profiles** (bug bounty, penetration testing, continuous attack-surface monitoring, vulnerability management, triage assistance, asset inventory / CMDB, compliance evidence, DevSecOps CI gating, reporting, M&A and third-party risk, threat-intel correlation, SOC enrichment, research and training, or custom) and RedAmon ticks the permissions that job needs and generates a pack tailored to it: a `SKILL.md` plus reference files covering the operating model, the graph's shape, the tool sequence for that job, the traps specific to it, and tool by tool exactly what *this* token can and cannot do. The tool facts are read from the server's own live tool list at export time, so a pack can never describe a tool differently from how the server serves it. Clients that never load a skill file (Cursor, Windsurf, Cline, Goose, Gemini CLI, Codex CLI) receive a shorter version of the same guidance inline the moment they connect.
+
+No profile ever ticks `kali:exec` or `recon:overwrite` for you, not even the ones that recommend them: a shell on a target-facing box and an irreversible graph wipe should never arrive as the side effect of choosing an item from a dropdown.
+
+> **Agent Skills teach RedAmon's agent. Agent Onboarding teaches yours.**
+
+> **[Wiki: MCP Server](https://github.com/samugit83/redamon/wiki/MCP-Server)** | **[Wiki: MCP API Reference](https://github.com/samugit83/redamon/wiki/MCP-API-Reference)** | **[Technical: README.MCP.SERVER.md](docs/readmes/README.MCP.SERVER.md)**
+
 ### Agent Workspace: Per-Project Filesystem, Background Jobs, Auto-Offload
 
 > **Watch the demo:** [RedAmon Agent Workspace: AI Runs 4 Parallel Pentests and Writes Its Own Report (YouTube)](https://youtu.be/dkgIk78T7Hw)
@@ -932,6 +948,7 @@ flowchart TB
 | **Secret Multiscanner** | Deep secret scanning across 14 source kinds (git, GitHub, GitLab, Docker, Hugging Face, S3, GCS, filesystem, Jenkins, Elasticsearch, Postman, CI) with 1060 detectors, live-credential verification, and one hardened container per source running in parallel | [Wiki: Secret Multiscanner](https://github.com/samugit83/redamon/wiki/Secret-Multiscanner) |
 | **Supply-Chain Scanner** | Offline malicious/vulnerable package detection (OSV-Scanner + GuardDog + retire.js) with a hardened DIRTY/CLEAN split; 3 layers (agent tools, standalone SBOM scan, live-target recon) | [README.SUPPLY_CHAIN.md](docs/readmes/README.SUPPLY_CHAIN.md) |
 | **PostgreSQL Database** | Project settings, user accounts, configuration data | [README.POSTGRES.md](docs/readmes/README.POSTGRES.md) |
+| **Settings Registry** | The one description of every recon parameter: its unit, bounds, engagement cap, stealth profile and who may write it. Every derived list the pipeline used to keep aligned by hand is a query over it | [README.SETTINGS_REGISTRY.md](docs/readmes/README.SETTINGS_REGISTRY.md) · [Wiki: Project Settings Registry](https://github.com/samugit83/redamon/wiki/Project-Settings-Registry) |
 | **Test Environments** | Intentionally vulnerable Docker containers for safe testing | [README.GPIGS.md](docs/readmes/README.GPIGS.md) |
 
 ---
@@ -1032,6 +1049,8 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 ## Contact
 
 For questions, feedback, or collaboration inquiries: **devergo.sam@gmail.com**
+
+**Sponsorship:** RedAmon is free and MIT licensed, and stays that way. If you would like to sponsor the project, write to the same address. Sponsorship helps cover development and testing costs.
 
 ---
 

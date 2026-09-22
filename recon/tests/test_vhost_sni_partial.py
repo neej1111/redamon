@@ -260,6 +260,43 @@ class TestRunVhostSniPartial(unittest.TestCase):
             recon_data = mocks["client"].update_graph_from_vhost_sni.call_args.args[0]
         self.assertIn("vhost_sni", recon_data)
 
+    # --------------------------------------------------------------
+    # The graph reader's real shape
+    # --------------------------------------------------------------
+    def _run_with_graph(self, config):
+        # What _build_vuln_scan_data_from_graph really returns: port_scan holds
+        # by_ip only. The fixture above carries by_host and so hid a KeyError
+        # that crashed every graph-backed run.
+        mocks = _setup_mocks()
+        mocks["graph_data"].return_value = {
+            "domain": "example.com",
+            "subdomains": ["www.example.com"],
+            "dns": {"domain": {"ips": {"ipv4": [], "ipv6": []}, "has_records": False},
+                    "subdomains": {"www.example.com": {
+                        "ips": {"ipv4": ["192.0.2.10"], "ipv6": []}, "has_records": True}}},
+            "metadata": {"include_root_domain": True},
+            "http_probe": {"by_url": {}},
+            "port_scan": {"by_ip": {}},
+            "resource_enum": {"by_base_url": {}, "discovered_urls": []},
+        }
+        from recon.partial_recon_modules import vulnerability_scanning as vs
+        with patch.object(vs, "_build_vuln_scan_data_from_graph", mocks["graph_data"]), \
+             patch.dict(sys.modules, {"graph_db": mocks["graph_db_module"]}), \
+             patch("recon.project_settings.get_settings", mocks["get_settings"]), \
+             patch("recon.main_recon_modules.vhost_sni_enum.run_vhost_sni_enrichment", mocks["runner"]):
+            vs.run_vhost_sni_partial(config)
+        return mocks["runner"].call_args[0][0]
+
+    def test_graph_targets_without_by_host_still_scan(self):
+        scanned = self._run_with_graph({"domain": "example.com", "include_graph_targets": True})
+        self.assertEqual(scanned["port_scan"]["by_host"], {})
+        self.assertIn("www.example.com", scanned["dns"]["subdomains"])
+
+    def test_user_ips_land_in_by_host_on_top_of_graph_targets(self):
+        scanned = self._run_with_graph({"domain": "example.com", "include_graph_targets": True,
+                                        "user_targets": {"subdomains": [], "ips": ["192.0.2.20"]}})
+        self.assertIn("192.0.2.20", scanned["port_scan"]["by_host"])
+
     def test_neo4j_unavailable_does_not_crash(self):
         mocks = self._run({"domain": "example.com",
                            "user_targets": {"subdomains": ["admin.example.com"], "ips": []}},

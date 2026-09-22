@@ -468,6 +468,13 @@ services:
       # with "cannot import name 'Neo4jClient' from 'graph_db' (unknown location)".
       # With this mount the path is read from Docker's own mount table instead.
       - ./graph_db:/app/graph_db:ro
+      # The recon settings registry, mounted for the same two reasons as
+      # graph_db: the orchestrator binds it into every spawned scan container, and
+      # it can only do that if it can read its own HOST path out of Docker's
+      # mount table rather than deriving it by string surgery. A scan refuses to
+      # start without a readable registry, so a wrong path here is a failed scan
+      # and not a silently different one.
+      - ./recon_settings:/app/recon_settings:ro
       - ./scanners/gvm_scan:/app/gvm_scan:ro
       - ./scanners/gvm_scan/output:/app/gvm_scan/output:rw
       - ./scanners/github_secret_hunt:/app/github_secret_hunt:ro
@@ -564,6 +571,10 @@ services:
       JOB_QUEUE_MAX_CONCURRENT: ${JOB_QUEUE_MAX_CONCURRENT:-4}
       JOB_QUEUE_MIN_FREE_DISK: ${JOB_QUEUE_MIN_FREE_DISK:-10737418240}
       TRAFFIC_MAINTENANCE_INTERVAL: ${TRAFFIC_MAINTENANCE_INTERVAL:-3600}
+      # How often the orchestrator asks the webapp to prune dead MCP tokens.
+      # Wired HERE because recon-orchestrator has NO env_file: a value set only
+      # in .env is silently inert (the documented 6.2.7 class of bug).
+      MCP_TOKEN_PRUNE_INTERVAL: ${MCP_TOKEN_PRUNE_INTERVAL:-86400}
       # D3: global + per-user concurrent-scan ceilings enforced at admission.
       # SAFE, GENEROUS DEFAULTS so unset resolves to a real limit (never "no cap").
       RECON_MAX_CONCURRENT_GLOBAL: ${RECON_MAX_CONCURRENT_GLOBAL:-30}
@@ -725,14 +736,20 @@ services:
       - "127.0.0.1:${MCP_METASPLOIT_PORT:-8003}:8003"
       - "127.0.0.1:${MCP_NMAP_PORT:-8004}:8004"
       - "127.0.0.1:${MCP_PLAYWRIGHT_PORT:-8005}:8005"
-      - "127.0.0.1:8013:8013"   # MSF progress stream (agent-internal)
-      - "127.0.0.1:8014:8014"   # Hydra progress stream (agent-internal)
+      - "127.0.0.1:${MSF_PROGRESS_HOST_PORT:-8013}:8013"   # MSF progress stream (agent-internal)
+      - "127.0.0.1:${HYDRA_PROGRESS_HOST_PORT:-8014}:8014" # Hydra progress stream (agent-internal)
       # 4444 stays routable on purpose: a compromised target connects BACK to the
       # operator host:4444 in direct (no-tunnel) reverse-shell mode. Loopback here
       # would break direct reverse shells. When a tunnel is active it binds
       # 127.0.0.1:4444 internally and is reached via the tunnel instead.
+      #
+      # Deliberately NOT relocatable via an env var. msfconsole binds the
+      # agent's LPORT setting INSIDE the container and the payload hands the
+      # target that same number, so moving only the host side of this mapping
+      # leaves the target dialling a port nothing listens on -- a reverse shell
+      # that never lands, with no error. Relocating 4444 means moving LPORT too.
       - "4444:4444"
-      - "127.0.0.1:4040:4040"   # ngrok local API (agent-internal)
+      - "127.0.0.1:${NGROK_API_HOST_PORT:-4040}:4040"   # ngrok local API (agent-internal)
       - "127.0.0.1:8015:8015"   # tunnel-manager config (webapp-internal)
       - "127.0.0.1:8016:8016"   # terminal PTY WS (browser reaches via agent:8090)
     volumes:
@@ -1050,6 +1067,34 @@ services:
       ACTIVATION_LOCK_TTL_MS: ${ACTIVATION_LOCK_TTL_MS:-}
       SCAN_SCHEDULE_MIN_INTERVAL_MINUTES: ${SCAN_SCHEDULE_MIN_INTERVAL_MINUTES:-}
       SCAN_SCHEDULE_ASSUMED_RUN_MINUTES: ${SCAN_SCHEDULE_ASSUMED_RUN_MINUTES:-}
+      # Inbound MCP server (/api/mcp-server): an external AI agent connecting IN
+      # and acting as one RedAmon user. DEFAULT OFF - a new authenticated inbound
+      # surface must be switched on deliberately, never inherited by upgrading.
+      # redamon.sh refuses to enable it while INTERNAL_API_KEY is unset or
+      # `changeme`, because the agent's auth (and so the whole graph-isolation
+      # story) fails open in that state and its port is on 0.0.0.0 in this file.
+      # Every knob below passes through EMPTY so unset keeps the safe code
+      # default; they are wired HERE because the webapp has NO env_file.
+      MCP_SERVER_ENABLED: ${MCP_SERVER_ENABLED:-false}
+      MCP_TOKEN_RETENTION_DAYS: ${MCP_TOKEN_RETENTION_DAYS:-}
+      MCP_RATE_READ_PER_MIN: ${MCP_RATE_READ_PER_MIN:-}
+      MCP_RATE_QUERY_PER_MIN: ${MCP_RATE_QUERY_PER_MIN:-}
+      MCP_RATE_WRITE_PER_MIN: ${MCP_RATE_WRITE_PER_MIN:-}
+      MCP_RATE_START_PER_WINDOW: ${MCP_RATE_START_PER_WINDOW:-}
+      MCP_RATE_START_WINDOW_MS: ${MCP_RATE_START_WINDOW_MS:-}
+      MCP_RATE_COMPARE_PER_WINDOW: ${MCP_RATE_COMPARE_PER_WINDOW:-}
+      MCP_RATE_COMPARE_WINDOW_MS: ${MCP_RATE_COMPARE_WINDOW_MS:-}
+      MCP_DISABLED_TOOLS: ${MCP_DISABLED_TOOLS:-}
+      MCP_LLM_DAILY_BUDGET: ${MCP_LLM_DAILY_BUDGET:-}
+      # Sandbox commands (kali_exec). DEFAULT OFF and INDEPENDENT of
+      # MCP_SERVER_ENABLED: it is the only part of this surface that reaches a
+      # live target outside a scan, so turning the server on must not turn it on.
+      MCP_KALI_EXEC_ENABLED: ${MCP_KALI_EXEC_ENABLED:-false}
+      MCP_RATE_EXEC_PER_MIN: ${MCP_RATE_EXEC_PER_MIN:-}
+      # The deployment's own public origin, WITH the port when non-default.
+      # Empty locally: the route then falls back to deriving it from the request,
+      # which is correct when nothing sits in front of the app.
+      MCP_ALLOWED_ORIGIN: ${MCP_ALLOWED_ORIGIN:-}
       # Global row cap for every RedZone analytics query (was a per-route LIMIT
       # of 200/500/1000/2000). Passed through EMPTY so unset keeps the 200k code
       # default in webapp/src/app/api/analytics/redzone/rowCap.ts. Lower it on a

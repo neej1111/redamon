@@ -21,7 +21,10 @@ export interface ProjectSummary {
   agentToolPhaseMap?: Record<string, string[]>
   stealthMode?: boolean
   agentRequireToolConfirmation?: boolean
-  roeEnabled?: boolean
+  /** The three columns the engagement-limit derivation reads. Never the flag. */
+  roeGlobalMaxRps?: number
+  roeExcludedHosts?: string[]
+  roeTimeWindowEnabled?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -135,7 +138,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
                 : project.agentToolPhaseMap,
               stealthMode: project.stealthMode,
               agentRequireToolConfirmation: project.agentRequireToolConfirmation,
-              roeEnabled: project.roeEnabled,
+              roeGlobalMaxRps: project.roeGlobalMaxRps,
+              roeExcludedHosts: project.roeExcludedHosts,
+              roeTimeWindowEnabled: project.roeTimeWindowEnabled,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt
             })

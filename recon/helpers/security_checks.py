@@ -988,14 +988,21 @@ def _iter_cert_targets(recon_data: Dict[str, Any]):
         if (str(host).lower(), port) in seen:
             continue          # tlsx already covered this target, and knows more
         san = [x for x in (cert.get("san") or []) if isinstance(x, str)]
+        # httpx reports the same verdicts as tlsx. They are absent only on data
+        # captured before http_probe kept them, so derive what can be derived;
+        # self_signed stays UNKNOWN rather than False, since these fields cannot
+        # prove a cert is properly issued.
+        expired, self_signed = cert.get("expired"), cert.get("self_signed")
+        mismatched, wildcard = cert.get("mismatched"), cert.get("wildcard")
         yield host, info.get("ip"), port, {
             "subject_cn": cert.get("subject_cn"), "san": san,
-            "subject_dn": None, "not_after": cert.get("not_after"),
-            "expired": _expired_from_not_after(cert.get("not_after")),
-            # httpx exposes no subject_dn/issuer_dn, so this is UNKNOWN, not False.
-            "self_signed": None,
-            "mismatched": (not _cert_names_host(host, cert.get("subject_cn"), san)),
-            "wildcard": _cert_is_wildcard(san),
+            "subject_dn": cert.get("subject_dn"), "not_after": cert.get("not_after"),
+            "expired": (bool(expired) if expired is not None
+                        else _expired_from_not_after(cert.get("not_after"))),
+            "self_signed": bool(self_signed) if self_signed is not None else None,
+            "mismatched": (bool(mismatched) if mismatched is not None
+                           else (not _cert_names_host(host, cert.get("subject_cn"), san))),
+            "wildcard": bool(wildcard) if wildcard is not None else _cert_is_wildcard(san),
             "tls_version": tls.get("version"), "cipher": tls.get("cipher"),
             "version_enum": [], "cipher_enum": [],
             "source": "http_probe",

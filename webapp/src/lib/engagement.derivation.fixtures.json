@@ -1,0 +1,38 @@
+{
+  "_generated": "HAND-MAINTAINED. Read by webapp/src/lib/engagement.derivation.test.ts AND by recon_settings/tests/test_engagement_derivation.py. Add a row here, not to either test.",
+  "_why": "roeEnabled is derived in two languages because the webapp cannot import Python. Two implementations of one safety rule is a drift risk, so both read this table and must agree on every row.",
+  "cases": [
+    { "name": "nothing set", "row": {}, "enabled": false },
+    { "name": "a rate ceiling", "row": { "roeGlobalMaxRps": 3 }, "enabled": true },
+    { "name": "a rate ceiling of one", "row": { "roeGlobalMaxRps": 1 }, "enabled": true },
+    { "name": "a zero ceiling is no ceiling", "row": { "roeGlobalMaxRps": 0 }, "enabled": false },
+    { "name": "an excluded host", "row": { "roeExcludedHosts": ["pay.target.test"] }, "enabled": true },
+    { "name": "an empty exclusion list", "row": { "roeExcludedHosts": [] }, "enabled": false },
+    { "name": "a blank exclusion entry", "row": { "roeExcludedHosts": ["", "  "] }, "enabled": false },
+    { "name": "a blank and a real entry", "row": { "roeExcludedHosts": ["", "a.test"] }, "enabled": true },
+    { "name": "a time window", "row": { "roeTimeWindowEnabled": true }, "enabled": true },
+    { "name": "a time window switched off", "row": { "roeTimeWindowEnabled": false }, "enabled": false },
+    {
+      "name": "all three off",
+      "row": { "roeGlobalMaxRps": 0, "roeExcludedHosts": [], "roeTimeWindowEnabled": false },
+      "enabled": false
+    },
+    {
+      "name": "all three on",
+      "row": { "roeGlobalMaxRps": 3, "roeExcludedHosts": ["a.test"], "roeTimeWindowEnabled": true },
+      "enabled": true
+    },
+    {
+      "name": "the stored column is ignored when nothing is set",
+      "row": { "roeEnabled": true, "roeGlobalMaxRps": 0 },
+      "enabled": false
+    },
+    {
+      "name": "the stored column is ignored when a limit IS set",
+      "row": { "roeEnabled": false, "roeGlobalMaxRps": 3 },
+      "enabled": true
+    },
+    { "name": "a null ceiling", "row": { "roeGlobalMaxRps": null }, "enabled": false },
+    { "name": "a null exclusion list", "row": { "roeExcludedHosts": null }, "enabled": false }
+  ]
+}

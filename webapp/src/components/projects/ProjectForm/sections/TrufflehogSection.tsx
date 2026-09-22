@@ -418,6 +418,178 @@ export function TrufflehogSection({ data, updateField, projectId, mode = 'edit',
             />
           )}
 
+          {/* ---- The rest of the shared options ----------------------------------
+                  These are project-level TruffleHog settings that have always
+                  been writable over the API and had no input anywhere: the
+                  per-source targets moved to the scan-profile rows above, and
+                  the shared ones stayed on Project and were forgotten. They
+                  stack rather than scroll, so they stay usable at phone width. */}
+          <div className={styles.toggleBlock}>
+            <div className={styles.toggleBlockHead}>
+              <span className={styles.toggleLabel}>Run the secret multiscanner</span>
+              <Toggle
+                checked={Boolean(get(data, 'trufflehogEnabled'))}
+                onChange={(checked) => setField(updateField, 'trufflehogEnabled', checked)}
+              />
+            </div>
+            <p className={`${styles.toggleDescription} ${styles.toggleDescriptionBelow}`}>
+              Off, the profiles above are kept and nothing runs.
+            </p>
+          </div>
+
+          <div className={styles.optionRow}>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-archive-depth">
+                Archive depth
+              </label>
+              <input
+                id="trufflehog-archive-depth"
+                type="number"
+                className="textInput"
+                min={0}
+                max={50}
+                value={Number(get(data, 'trufflehogArchiveMaxDepth') ?? 0)}
+                onChange={(e) => setField(
+                  updateField, 'trufflehogArchiveMaxDepth', parseInt(e.target.value) || 0
+                )}
+              />
+              <span className={styles.fieldHint}>
+                How many nested archives to open. 0 opens none.
+              </span>
+            </div>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-decode-depth">
+                Decode depth
+              </label>
+              <input
+                id="trufflehog-decode-depth"
+                type="number"
+                className="textInput"
+                min={0}
+                max={50}
+                value={Number(get(data, 'trufflehogMaxDecodeDepth') ?? 5)}
+                onChange={(e) => setField(
+                  updateField, 'trufflehogMaxDecodeDepth', parseInt(e.target.value) || 0
+                )}
+              />
+              <span className={styles.fieldHint}>
+                How many layers of base64 and friends to unwrap.
+              </span>
+            </div>
+          </div>
+
+          <div className={styles.optionRow}>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-archive-size">
+                Archive max size
+              </label>
+              <input
+                id="trufflehog-archive-size"
+                type="text"
+                className="textInput"
+                value={String(get(data, 'trufflehogArchiveMaxSize') ?? '')}
+                onChange={(e) => setField(updateField, 'trufflehogArchiveMaxSize', e.target.value)}
+                placeholder="e.g. 250MB"
+              />
+              <span className={styles.fieldHint}>Empty uses the tool&apos;s own default.</span>
+            </div>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-archive-timeout">
+                Archive timeout
+              </label>
+              <input
+                id="trufflehog-archive-timeout"
+                type="text"
+                className="textInput"
+                value={String(get(data, 'trufflehogArchiveTimeout') ?? '')}
+                onChange={(e) => setField(updateField, 'trufflehogArchiveTimeout', e.target.value)}
+                placeholder="e.g. 30s"
+              />
+              <span className={styles.fieldHint}>Empty uses the tool&apos;s own default.</span>
+            </div>
+          </div>
+
+          <div className={styles.optionRow}>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-detector-timeout">
+                Detector timeout
+              </label>
+              <input
+                id="trufflehog-detector-timeout"
+                type="text"
+                className="textInput"
+                value={String(get(data, 'trufflehogDetectorTimeout') ?? '')}
+                onChange={(e) => setField(updateField, 'trufflehogDetectorTimeout', e.target.value)}
+                placeholder="e.g. 10s"
+              />
+              <span className={styles.fieldHint}>
+                How long one detector may spend verifying a candidate.
+              </span>
+            </div>
+            <div className={styles.fieldGroup} style={{ flex: '1 1 240px', minWidth: 0 }}>
+              <label className={styles.fieldLabel} htmlFor="trufflehog-filter-entropy">
+                Entropy filter
+              </label>
+              <input
+                id="trufflehog-filter-entropy"
+                type="text"
+                className="textInput"
+                value={String(get(data, 'trufflehogFilterEntropy') ?? '')}
+                onChange={(e) => setField(updateField, 'trufflehogFilterEntropy', e.target.value)}
+                placeholder="e.g. 3.0"
+              />
+              <span className={styles.fieldHint}>
+                Drop candidates below this Shannon entropy. Empty keeps them all.
+              </span>
+            </div>
+          </div>
+
+          <div className={styles.toggleBlock}>
+            <div className={styles.toggleBlockHead}>
+              <span className={styles.toggleLabel}>Skip archives</span>
+              <Toggle
+                checked={Boolean(get(data, 'trufflehogForceSkipArchives'))}
+                onChange={(checked) => setField(updateField, 'trufflehogForceSkipArchives', checked)}
+              />
+            </div>
+          </div>
+          <div className={styles.toggleBlock}>
+            <div className={styles.toggleBlockHead}>
+              <span className={styles.toggleLabel}>Skip binaries</span>
+              <Toggle
+                checked={Boolean(get(data, 'trufflehogForceSkipBinaries'))}
+                onChange={(checked) => setField(updateField, 'trufflehogForceSkipBinaries', checked)}
+              />
+            </div>
+          </div>
+          <div className={styles.toggleBlock}>
+            <div className={styles.toggleBlockHead}>
+              <span className={styles.toggleLabel}>Drop unverified JWTs</span>
+              <Toggle
+                checked={Boolean(get(data, 'trufflehogDropUnverifiedJwt'))}
+                onChange={(checked) => setField(updateField, 'trufflehogDropUnverifiedJwt', checked)}
+              />
+            </div>
+            <p className={`${styles.toggleDescription} ${styles.toggleDescriptionBelow}`}>
+              A JWT nobody could verify is usually an expired token in a test fixture.
+            </p>
+          </div>
+          <div className={styles.toggleBlock}>
+            <div className={styles.toggleBlockHead}>
+              <span className={styles.toggleLabel}>Allow overlapping verification</span>
+              <Toggle
+                checked={Boolean(get(data, 'trufflehogAllowVerificationOverlap'))}
+                onChange={(checked) => setField(
+                  updateField, 'trufflehogAllowVerificationOverlap', checked
+                )}
+              />
+            </div>
+            <p className={`${styles.toggleDescription} ${styles.toggleDescriptionBelow}`}>
+              Let more than one detector verify the same candidate. Louder, and occasionally the
+              only way a shared-format key is attributed to the right service.
+            </p>
+          </div>
+
         </div>
       )}
     </div>

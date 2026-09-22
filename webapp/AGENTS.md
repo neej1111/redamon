@@ -12,6 +12,8 @@ When performing these actions, ALWAYS invoke the corresponding skill FIRST:
 | ------ | ----- |
 | Adding a built-in attack skill to the agent | `builtin-agent-skill` |
 | Adding or integrating an LLM provider | `llm-provider-integration` |
+| Adding, removing or changing a tool on the inbound MCP server | `mcp-server-tools` |
+| Changing MCP token scopes, their UI wording, or the MCP API reference generator | `mcp-server-tools` |
 | Changing or adding a project setting or default value | `project-settings-cascade` |
 | Editing a Prisma @default, a Python settings default, or the /defaults endpoint | `project-settings-cascade` |
 | Editing agent skill classification, phase injection, or the attack-skill UI | `builtin-agent-skill` |

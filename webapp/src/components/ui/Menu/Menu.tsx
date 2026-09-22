@@ -21,15 +21,26 @@ interface MenuContextValue {
 const MenuContext = createContext<MenuContextValue | null>(null)
 
 interface MenuProps {
-  /** The trigger element */
+  /**
+   * The trigger's CONTENT, not a control of its own. The wrapper below is
+   * already `role="button"` with its own tabIndex and key handling, so a
+   * <button> passed here nests one interactive element inside another: two tab
+   * stops, two things announced as buttons, and Enter firing both handlers.
+   * Pass a span, an icon or text.
+   */
   trigger: ReactNode
   /** Menu items */
   children: ReactNode
   /** Alignment relative to trigger */
   align?: 'left' | 'right'
+  /**
+   * Names the trigger for assistive technology. Needed whenever the trigger is
+   * an icon, which has no text for the accessible name to come from.
+   */
+  ariaLabel?: string
 }
 
-export function Menu({ trigger, children, align = 'left' }: MenuProps) {
+export function Menu({ trigger, children, align = 'left', ariaLabel }: MenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const triggerRef = useRef<HTMLDivElement>(null)
@@ -145,6 +156,8 @@ export function Menu({ trigger, children, align = 'left' }: MenuProps) {
         tabIndex={0}
         aria-haspopup="menu"
         aria-expanded={isOpen}
+        aria-label={ariaLabel}
+        title={ariaLabel}
       >
         {trigger}
       </div>

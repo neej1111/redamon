@@ -152,3 +152,4 @@ Maintained by hand (not touched by `sync.sh`). One row per skill.
 | `supply-chain-scan` | Supply-chain scanner: offline OSV DB (not scan-bootstrapped), world-readable DB, soft-error markers | [SKILL.md](skills/supply-chain-scan/SKILL.md) |
 | `add-community-skill` | Importable .md attack workflow: real tool names only, no rebuild, stay classifiable, per-user | [SKILL.md](skills/add-community-skill/SKILL.md) |
 | `add-partial-recon` | Partial-recon support: graph-sourced inputs, MERGE dedup, the input-node modal, mirror the right ref impl | [SKILL.md](skills/add-partial-recon/SKILL.md) |
+| `mcp-server-tools` | Inbound MCP server tools: regenerate the wiki API reference, spec-accurate destructiveHint, runnable example calls | [SKILL.md](skills/mcp-server-tools/SKILL.md) |

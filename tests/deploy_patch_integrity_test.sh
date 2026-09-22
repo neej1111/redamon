@@ -66,7 +66,10 @@ echo "== operator app-config reaches the server .env (all three plumbing points)
 # (1) defaulted so `set -u` cannot kill the run, (2) in build_deploy_env's export
 # list so it crosses the SSH boundary, (3) seeded into the app .env on the host.
 for k in NVD_API_KEY TUNNELS_ENABLED \
-         OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS OSV_DB_TTL_SECONDS OSV_DB_REFRESH_TIMEOUT; do
+         OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS OSV_DB_TTL_SECONDS OSV_DB_REFRESH_TIMEOUT \
+         MCP_SERVER_ENABLED MCP_TOKEN_RETENTION_DAYS MCP_LLM_DAILY_BUDGET \
+         MCP_RATE_READ_PER_MIN MCP_RATE_QUERY_PER_MIN MCP_RATE_WRITE_PER_MIN \
+         MCP_RATE_START_PER_WINDOW MCP_RATE_START_WINDOW_MS; do
   miss=""
   # Defaults are packed several per line (`: "${A:=}"; : "${B:=}"`), so this
   # cannot anchor at ^.
@@ -77,8 +80,39 @@ for k in NVD_API_KEY TUNNELS_ENABLED \
   [ -z "$miss" ] && pass "$k plumbed (default + export + seed)" || fail "$k missing:${miss}"
 done
 
+echo "== the app-config seed runs on UPDATE, not only INIT =="
+# cmd_init wipes and rebuilds the host, so a seed that lives only there means an
+# operator who edits .env and runs `update` sees nothing happen. Worse for the
+# MCP flag specifically: redamon.sh's ensure_auth_secrets APPENDS
+# MCP_SERVER_ENABLED=false when the key is absent, so an unseeded host is
+# actively pinned off.
+awk '/^cmd_update\(\)/,/^}/' "$DEPLOY" | grep -qE "^seed MCP_SERVER_ENABLED " \
+  && pass "cmd_update re-seeds the app .env" \
+  || fail "cmd_update does not seed app config (an .env edit + update is a no-op)"
+# An .env-only change rebuilds no image, so redamon.sh's diff-driven update would
+# leave the old container running with the old environment.
+awk '/^cmd_update\(\)/,/^}/' "$DEPLOY" | grep -q "up -d webapp" \
+  && pass "cmd_update recreates the webapp so a changed .env applies" \
+  || fail "cmd_update never recreates the webapp (a seeded value would not take effect)"
+
+echo "== the nginx renderer receives its own MCP inputs =="
+# _mcp_gate_block reads these on the REMOTE host. They must cross the SSH
+# boundary (build_deploy_env) AND be exported into the renderer's environment
+# (setup_nginx_tls). Missing either fails SILENTLY: `:-false` defaults win and
+# the operator's opt-in is inert with no warning.
+for k in MCP_EDGE_ALLOW_BEARER MCP_CLIENT_CIDRS; do
+  miss=""
+  grep -qE ": \"\\\$\{${k}:=" "$DEPLOY" || miss="${miss} default"
+  awk -v k="$k" '/^build_deploy_env\(\)/,/^}/ { if ($0 ~ k) found=1 } END { exit !found }' "$DEPLOY" \
+                                            || miss="${miss} deploy.env-export"
+  awk -v k="$k" '/^setup_nginx_tls\(\)/,/^}/ { if ($0 ~ ("export.*" k)) found=1 } END { exit !found }' "$DEPLOY" \
+                                            || miss="${miss} nginx-export"
+  [ -z "$miss" ] && pass "$k plumbed (default + export + nginx-export)" || fail "$k missing:${miss}"
+done
+
 echo "== the OSV knobs are documented where an operator will look =="
-for k in OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS; do
+for k in OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS \
+         MCP_SERVER_ENABLED MCP_CLIENT_CIDRS MCP_EDGE_ALLOW_BEARER; do
   grep -q "$k" "$DEPLOY_ENV_EXAMPLE" && pass "$k in deploy .env.example" || fail "$k undocumented in deploy .env.example"
 done
 
@@ -87,7 +121,8 @@ echo "== orchestrator knobs are wired in compose (it has NO env_file) =="
 # environment block. A knob documented in .env.example but absent here is inert:
 # the operator sets it, nothing happens, and nothing says why.
 for k in OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS OSV_DB_TTL_SECONDS OSV_DB_REFRESH_TIMEOUT \
-         SUPPLY_CHAIN_ANALYZER_MEM SUPPLY_CHAIN_ANALYZER_PIDS SUPPLY_CHAIN_ANALYZER_NANOCPUS; do
+         SUPPLY_CHAIN_ANALYZER_MEM SUPPLY_CHAIN_ANALYZER_PIDS SUPPLY_CHAIN_ANALYZER_NANOCPUS \
+         MCP_TOKEN_PRUNE_INTERVAL; do
   grep -qE "^ +${k}: \\\$\{${k}" "$COMPOSE" && pass "$k wired into compose" || fail "$k not wired into compose (inert in .env)"
 done
 

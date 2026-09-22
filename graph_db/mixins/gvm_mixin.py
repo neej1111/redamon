@@ -13,6 +13,7 @@ from datetime import datetime
 
 from graph_db.cpe_resolver import _resolve_cpe_to_display_name, _parse_cpe_string, _CPE_SKIP_LIST
 from graph_db.cert_key import build_cert_key
+from graph_db.technology_identity import resolve_tech_name
 
 
 class GvmMixin:
@@ -124,7 +125,9 @@ class GvmMixin:
         OS / general technologies (e.g. Ubuntu, Linux — no specific port):
             IP -[:USES_TECHNOLOGY {detected_by: 'gvm'}]-> Technology
         """
-        name = tech["name"]
+        # cpe_resolver's title-case fallback can spell a product differently
+        # from httpx; reuse the spelling already in this project.
+        name = resolve_tech_name(session, tech["name"], user_id, project_id)
         version = tech["version"]
         cpe = tech["cpe"]
         target_ip = tech["target_ip"]

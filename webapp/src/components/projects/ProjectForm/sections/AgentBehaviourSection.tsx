@@ -8,8 +8,34 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { ModelPicker } from '@/components/shared/ModelPicker'
 import { REGEX_IPV4 } from '@/lib/validation'
+import { RegistryFields } from '../RegistryFields'
+import { field } from '@/lib/reconSettings/registry'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
+
+/**
+ * Both vocabularies come from the registry, which is also what the save
+ * validates against and what the RoE parse prompt teaches the model. Hard-coding
+ * them here is how the UI drifts into offering a token the gate cannot enforce:
+ * `roeForbiddenCategories` is matched EXACTLY against CATEGORY_TOOL_MAP, so a
+ * value this list invents is recorded, shown as a rule, and never refuses
+ * anything.
+ */
+const CATEGORY_LABELS: Record<string, string> = {
+  brute_force: 'Credential testing',
+  dos: 'Availability testing',
+  social_engineering: 'Social engineering',
+  physical: 'Physical access',
+  exploitation: 'Exploitation',
+}
+
+const FORBIDDEN_CATEGORIES = (field('roeForbiddenCategories')?.values ?? []).map(value => ({
+  value,
+  label: CATEGORY_LABELS[value] ?? value,
+}))
+
+/** The agent's real tool names. A near-miss never matches the gate. */
+const FORBIDDEN_TOOLS = field('roeForbiddenTools')?.values ?? []
 
 interface AgentBehaviourSectionProps {
   data: FormData
@@ -21,6 +47,22 @@ interface AgentBehaviourSectionProps {
 export function AgentBehaviourSection({ data, updateField, detectedHostIp }: AgentBehaviourSectionProps) {
   const [isOpen, setIsOpen] = useState(true)
   const { userId } = useProject()
+
+  const toggleForbiddenTool = (tool: string) => {
+    const tools = data.roeForbiddenTools || []
+    updateField(
+      'roeForbiddenTools',
+      tools.includes(tool) ? tools.filter(t => t !== tool) : [...tools, tool]
+    )
+  }
+
+  const toggleForbiddenCategory = (cat: string) => {
+    const cats = data.roeForbiddenCategories || []
+    updateField(
+      'roeForbiddenCategories',
+      cats.includes(cat) ? cats.filter(c => c !== cat) : [...cats, cat]
+    )
+  }
 
   return (
     <div className={styles.section}>
@@ -773,6 +815,25 @@ export function AgentBehaviourSection({ data, updateField, detectedHostIp }: Age
                 </div>
               </div>
             )}
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>Allow MCP Sandbox Commands</span>
+                <p className={styles.toggleDescription}>
+                  Give an external agent connected over the MCP Server a SHELL in RedAmon&apos;s
+                  Kali sandbox: <code>bash -c</code> with the full toolset, the same access the
+                  in-app agent has. There is no allowlist and, unlike a scan, <strong>no check
+                  on what it is aimed at</strong> &mdash; it can reach any host the sandbox can,
+                  not only this project&apos;s target, and no human confirms each command.
+                  The token also needs the &quot;Shell access to the Kali sandbox&quot; permission,
+                  and an access token can never turn this on by itself. Enable it only for an
+                  agent you would trust with a terminal on that box.
+                </p>
+              </div>
+              <Toggle
+                checked={data.mcpKaliExecEnabled ?? false}
+                onChange={(checked) => updateField('mcpKaliExecEnabled', checked)}
+              />
+            </div>
           </div>
 
           {/* Retries, Logging & Debug */}
@@ -826,6 +887,131 @@ export function AgentBehaviourSection({ data, updateField, detectedHostIp }: Age
             </div>
           </div>
 
+          {/* --- Engagement limits the AGENT enforces -------------------------------
+              Six columns the agent checks in code before a tool runs, as opposed
+              to the engagement RECORD, which it only reads as prompt context.
+              They sit here rather than with the engagement record because a
+              field belongs beside the thing that enforces it: these decide what
+              the agent may do, and their sibling limits - the rate ceiling, the
+              excluded hosts, the scanning window - decide what the pipeline may
+              reach and live in Target & Modules.
+
+              Editable at any time and writable over MCP, in either direction.
+              What makes that safe is not a write-time direction rule but that
+              each one is CHECKED before the tool executes, whatever the setting
+              said when it was written. */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Engagement limits</h3>
+            <p className={styles.sectionDescription}>
+              Refused before a tool runs, not merely described to the model. The engagement&apos;s
+              other limits - the request-rate ceiling, the never-touch hosts and the scanning
+              window - are in Target &amp; Modules.
+            </p>
+
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Max allowed phase</label>
+                <select
+                  className="select"
+                  value={data.roeMaxSeverityPhase}
+                  onChange={(e) => updateField('roeMaxSeverityPhase', e.target.value)}
+                >
+                  <option value="informational">Informational only (recon/scanning)</option>
+                  <option value="exploitation">Up to exploitation</option>
+                  <option value="post_exploitation">All phases (no restriction)</option>
+                </select>
+                <span className={styles.fieldHint}>
+                  Bounds how far an attack chain may be taken. A step past it is refused before
+                  it runs.
+                </span>
+              </div>
+            </div>
+
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Forbidden tools</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {FORBIDDEN_TOOLS.map(tool => (
+                    <label key={tool} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={(data.roeForbiddenTools || []).includes(tool)}
+                        onChange={() => toggleForbiddenTool(tool)}
+                      />
+                      <code>{tool}</code>
+                    </label>
+                  ))}
+                </div>
+                <span className={styles.fieldHint}>
+                  Whatever that tool&apos;s own enable flag says. Refused before the tool
+                  executes, by exact name: these are the agent&apos;s real tool names, so a
+                  ban can never be recorded against something that will not match.
+                </span>
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Forbidden categories</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {FORBIDDEN_CATEGORIES.map(cat => (
+                    <label key={cat.value} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={(data.roeForbiddenCategories || []).includes(cat.value)}
+                        onChange={() => toggleForbiddenCategory(cat.value)}
+                      />
+                      {cat.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>Allow availability testing (DoS)</span>
+                <p className={styles.toggleDescription}>
+                  Off refuses the DoS path before it runs and withholds the DoS skill from the
+                  agent&apos;s options, whatever their own toggles say.
+                </p>
+              </div>
+              <Toggle
+                checked={data.roeAllowDos}
+                onChange={(checked) => updateField('roeAllowDos', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>Allow account lockout</span>
+                <p className={styles.toggleDescription}>
+                  Off keeps credential attacks to a single attempt per account.
+                </p>
+              </div>
+              <Toggle
+                checked={data.roeAllowAccountLockout}
+                onChange={(checked) => updateField('roeAllowAccountLockout', checked)}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <div>
+                <span className={styles.toggleLabel}>Allow social engineering</span>
+                <p className={styles.toggleDescription}>
+                  Off withholds the social-engineering skills from the agent&apos;s options.
+                </p>
+              </div>
+              <Toggle
+                checked={data.roeAllowSocialEngineering}
+                onChange={(checked) => updateField('roeAllowSocialEngineering', checked)}
+              />
+            </div>
+          </div>
+
+
+          <RegistryFields
+            keys={['agentBruteForceMaxWordlistAttempts', 'agentBruteforceSpeed', 'agentLlmParseMaxRetries', 'fireteamConfirmationTimeoutSec']}
+            data={data}
+            updateField={updateField}
+            title="Advanced"
+            description="Settings this tool accepts that have no dedicated control. Bounds, options and descriptions come from the settings registry, so they are the same ones the API enforces."
+          />
         </div>
       )}
     </div>

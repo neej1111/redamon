@@ -7,6 +7,7 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 import { NextRequest, NextResponse } from 'next/server'
 import { settingsFingerprint } from '@/lib/jobQueue'
+import { authProfileFingerprint } from '@/lib/authProfileFingerprint'
 
 const h = vi.hoisted(() => ({
   effectiveUser: vi.fn(),
@@ -21,6 +22,7 @@ const h = vi.hoisted(() => ({
   sjCount: vi.fn(),
   projectFindMany: vi.fn(),
   projectFindUnique: vi.fn(),
+  authProfileFindUnique: vi.fn(),
   orchestratorFetch: vi.fn(),
 }))
 
@@ -42,6 +44,7 @@ vi.mock('@/lib/prisma', () => ({
       findUnique: (...a: unknown[]) => h.projectFindUnique(...a),
       findMany: (...a: unknown[]) => h.projectFindMany(...a),
     },
+    projectAuthProfile: { findUnique: (...a: unknown[]) => h.authProfileFindUnique(...a) },
   },
 }))
 vi.mock('@/lib/access', () => ({
@@ -420,6 +423,12 @@ describe('POST cancel', () => {
 })
 
 describe('POST reconfirm', () => {
+  /** What the dispatcher will recompute when it picks the row up. */
+  const dispatcherHash = (profile: Parameters<typeof authProfileFingerprint>[0]) =>
+    settingsFingerprint('full_recon', PROJECT as unknown as Record<string, unknown>, {
+      authProfileFp: authProfileFingerprint(profile),
+    })
+
   test('a needs_review row is requeued with a freshly recomputed fingerprint', async () => {
     h.jqFindUnique.mockResolvedValue({ id: 'j1', projectId: 'p1', kind: 'full_recon', status: 'needs_review' })
     const res = await reconfirm(req(), sp('j1'))
@@ -427,10 +436,38 @@ describe('POST reconfirm', () => {
     expect(h.jqUpdate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: 'queued',
-        settingsHash: settingsFingerprint('full_recon', PROJECT as unknown as Record<string, unknown>),
+        settingsHash: dispatcherHash(null),
         blockedCode: '',
       }),
     }))
+  })
+
+  // REGRESSION: needs_review was a state with no exit. reconfirm recomputed the
+  // fingerprint from the TruffleHog extra alone, while BOTH enqueue and dispatch
+  // also fold in the auth profile - a relation the Project-row fingerprint
+  // cannot see, and non-empty for full_recon and partial_recon. So the
+  // re-confirmed row stored a hash the dispatcher would never reproduce: it
+  // dispatched, failed the comparison, and returned to needs_review forever. No
+  // UI could recover it, and no MCP tool exposes reconfirm.
+  //
+  // The old test could not catch this: with no projectAuthProfile in the prisma
+  // mock the lookup threw, authProfileFingerprintExtra swallowed it, and both
+  // sides degraded to {} together.
+  test('REGRESSION: a re-confirmed job stores the hash the DISPATCHER recomputes', async () => {
+    const profile = {
+      authType: 'header', authHeaderName: 'Authorization', authValue: 'Bearer s3cret',
+      extraHeaders: { 'X-Env': 'staging' }, scopeHosts: ['example.com'], reconEnabled: true,
+    }
+    h.authProfileFindUnique.mockResolvedValue(profile)
+    h.jqFindUnique.mockResolvedValue({ id: 'j1', projectId: 'p1', kind: 'full_recon', status: 'needs_review' })
+
+    await reconfirm(req(), sp('j1'))
+
+    const stored = h.jqUpdate.mock.calls[0][0].data.settingsHash
+    expect(stored).toBe(dispatcherHash(profile))
+    // And it is genuinely profile-dependent, so the assertion above is not
+    // passing because both sides happen to ignore the profile.
+    expect(stored).not.toBe(dispatcherHash(null))
   })
 
   test('a non-needs_review row is a 409', async () => {

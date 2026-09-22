@@ -12,9 +12,13 @@ import prisma from '@/lib/prisma'
 import { orchestratorFetch } from '@/lib/orchestrator'
 import { isActivationInProgress } from '@/lib/activationLock'
 import { describeScanWriters } from '@/lib/graphWriters'
+import { currentAuthorization, loadEngagement } from '@/lib/engagement'
+import { settingsFingerprint } from '@/lib/jobQueue'
 import { normalizeOrchestratorStartError } from '@/lib/orchestratorError'
+import { applyRetentionSafe } from '@/lib/scanRetention'
 import {
   prepareVersionsForFullScan,
+  rollbackPreparedVersions,
   createScanJob,
   SnapshotFreezeError,
   type ScanMode,
@@ -23,6 +27,38 @@ import {
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
 const WEBAPP_URL = process.env.WEBAPP_URL || 'http://localhost:3000'
+
+// Serialises the check-freeze-start sequence per project. In-memory, per-process
+// (webapp is single-replica, so a shared lock is not required; if ever scaled
+// out, move to a Postgres advisory lock). Every start path - the manual button,
+// the scheduler, the queue dispatcher and MCP - goes through startFullScan, so
+// one map closes the window between describeScanWriters and the orchestrator
+// call in which two starts can both snapshot a mid-write graph.
+const globalForScanLock = globalThis as unknown as {
+  __fullScanLocks?: Map<string, Promise<unknown>>
+}
+const scanLocks: Map<string, Promise<unknown>> =
+  globalForScanLock.__fullScanLocks ?? new Map()
+globalForScanLock.__fullScanLocks = scanLocks
+
+function withProjectStartLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = scanLocks.get(projectId) ?? Promise.resolve()
+  // Run whether the previous holder resolved or rejected: a failed start must
+  // not wedge the project's queue.
+  const run = prior.then(fn, fn)
+  // The stored link never rejects, so a caller's error cannot become an
+  // unhandled rejection via the chain. The map stays bounded by deleting the
+  // entry once this is the last holder.
+  const link = run.then(
+    () => undefined,
+    () => undefined
+  )
+  scanLocks.set(projectId, link)
+  void link.then(() => {
+    if (scanLocks.get(projectId) === link) scanLocks.delete(projectId)
+  })
+  return run
+}
 
 export interface StartFullScanInput {
   projectId: string
@@ -56,11 +92,48 @@ export interface StartFullScanFailure {
   /** What is already rewriting the graph, when the start was refused for that. */
   busy?: string
   scanJobId?: string | null
+  /**
+   * 'unknown' when the orchestrator call threw (timeout, connection reset): the
+   * container may or may not have been spawned, so the caller must poll status
+   * before retrying. Absent means the orchestrator gave a definitive answer.
+   */
+  startOutcome?: 'unknown'
 }
 
 export type StartFullScanResult = StartFullScanSuccess | StartFullScanFailure
 
-export async function startFullScan(input: StartFullScanInput): Promise<StartFullScanResult> {
+/**
+ * The settings digest for a directly-started run.
+ *
+ * Never throws: provenance is a side effect of starting a scan, and failing to
+ * record it must not fail the start an operator asked for. A null hash reads as
+ * "not recorded", which is honest; a failed start would not be.
+ */
+async function fingerprintProjectSettings(projectId: string): Promise<string | null> {
+  try {
+    const row = await prisma.project.findUnique({ where: { id: projectId } })
+    if (!row) return null
+    return settingsFingerprint('full_recon', row as unknown as Record<string, unknown>)
+  } catch (err) {
+    console.error('[scanTimeline] could not fingerprint settings for provenance:', err)
+    return null
+  }
+}
+
+async function currentAuthorizationId(projectId: string): Promise<string | null> {
+  try {
+    return (await currentAuthorization(projectId))?.id ?? null
+  } catch (err) {
+    console.error('[scanTimeline] could not read the current authorization:', err)
+    return null
+  }
+}
+
+export function startFullScan(input: StartFullScanInput): Promise<StartFullScanResult> {
+  return withProjectStartLock(input.projectId, () => startFullScanLocked(input))
+}
+
+async function startFullScanLocked(input: StartFullScanInput): Promise<StartFullScanResult> {
   const { projectId, mode, trigger } = input
 
   // 4A.3: never start a scan into an in-flight graph swap.
@@ -117,6 +190,26 @@ export async function startFullScan(input: StartFullScanInput): Promise<StartFul
     return { ok: false, status: 400, error: 'Project has no target domain configured' }
   }
 
+  // A third-party engagement must carry a rate ceiling AND the record of what
+  // authorized it. Checked HERE rather than in the MCP tool, because an
+  // agent-facing rule that only applies when an agent is present is not a
+  // control: the scheduler and the queue dispatcher reach this same function.
+  //
+  // It refuses rather than downgrading. A scan that quietly ran without its
+  // ceiling is the exact failure this exists to prevent, and the operator would
+  // find out from the target.
+  const engagement = await loadEngagement(projectId)
+  if (engagement.blockers.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        'This is a third-party engagement and it is not startable: ' +
+        engagement.blockers.join(' ') +
+        ' Use preflight_scope_check to see the whole picture.',
+    }
+  }
+
   // Freeze/rotate versions BEFORE starting. Fail closed: the graph is never
   // destroyed unsaved (Risk 4).
   let prepared
@@ -130,17 +223,50 @@ export async function startFullScan(input: StartFullScanInput): Promise<StartFul
     throw err
   }
 
-  const response = await orchestratorFetch(`${RECON_ORCHESTRATOR_URL}/recon/${projectId}/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      project_id: projectId,
-      user_id: project.userId,
-      webapp_api_url: WEBAPP_URL,
-      // Telemetry/history only - the pipeline behaves identically either way.
+  let response
+  try {
+    response = await orchestratorFetch(`${RECON_ORCHESTRATOR_URL}/recon/${projectId}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_id: projectId,
+        user_id: project.userId,
+        webapp_api_url: WEBAPP_URL,
+        // Telemetry/history only - the pipeline behaves identically either way.
+        mode,
+      }),
+    })
+  } catch (err) {
+    // A thrown fetch (timeout, connection reset) is NOT a refusal: the
+    // orchestrator may already have spawned the container. Rolling the versions
+    // back could therefore discard the snapshot of a graph a live scan is about
+    // to overwrite, so the prepared version stays and the caller is told the
+    // outcome is unknown.
+    console.error(`[scanTimeline] orchestrator start call failed for project ${projectId}:`, err)
+    const job = await createScanJob({
+      projectId,
+      versionId: prepared.currentVersion.id,
+      trigger,
       mode,
-    }),
-  })
+      status: 'failed',
+      initiatedByUserId: input.actorUserId ?? null,
+      scheduleId: input.scheduleId ?? null,
+      ramReason: 'start outcome unknown: the orchestrator did not answer',
+    }).catch(jobErr => {
+      console.error('[scanTimeline] could not record unknown-outcome scan job:', jobErr)
+      return null
+    })
+
+    return {
+      ok: false,
+      status: 503,
+      startOutcome: 'unknown',
+      error:
+        'The orchestrator did not answer, so it is unknown whether the scan started. ' +
+        'Check the scan status before retrying.',
+      scanJobId: job?.id ?? null,
+    }
+  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
@@ -149,10 +275,15 @@ export async function startFullScan(input: StartFullScanInput): Promise<StartFul
     const norm = normalizeOrchestratorStartError(errorData, 'Failed to start recon')
     const isLimit = !!norm.limit?.limitType
 
+    // A definitive refusal: nothing was spawned, so undo the freeze rather than
+    // leave a minted version and a duplicate snapshot behind (P0-2).
+    const rolledBack = await rollbackPreparedVersions(projectId, prepared)
+    const versionId = rolledBack ? prepared.frozenVersionId : prepared.currentVersion.id
+
     // Record the attempt so the timeline shows why it did not run.
     const job = await createScanJob({
       projectId,
-      versionId: prepared.currentVersion.id,
+      versionId,
       trigger,
       mode,
       status: norm.limit?.limitType === 'ram' ? 'deferred_ram' : 'failed',
@@ -175,11 +306,22 @@ export async function startFullScan(input: StartFullScanInput): Promise<StartFul
 
   const state = await response.json()
 
+  // The scan is accepted, so the version it minted is real and the timeline can
+  // be trimmed to policy. Retention deletes the oldest unpinned versions, which
+  // is why it must never run for a start that did not begin (P0-2).
+  await applyRetentionSafe(projectId)
+
   const job = await createScanJob({
     projectId,
     versionId: prepared.currentVersion.id,
     trigger,
     mode,
+    // Provenance, so a graph node can be traced back to the configuration that
+    // produced it and the document that permitted looking. JobQueue.settingsHash
+    // is the only other settings fingerprint anywhere and it is deleted with the
+    // queue row the moment the job dispatches.
+    settingsHash: await fingerprintProjectSettings(projectId),
+    authorizationId: await currentAuthorizationId(projectId),
     status: 'running',
     initiatedByUserId: input.actorUserId ?? null,
     scheduleId: input.scheduleId ?? null,

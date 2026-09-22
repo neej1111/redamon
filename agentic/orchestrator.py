@@ -438,6 +438,11 @@ class AgentOrchestrator:
             llm=self.llm
         )
         graph_tool = self.neo4j_manager.get_tool()
+        # The two companions ride on the SAME condition as query_graph:
+        # get_tool() returns None when Neo4j setup fails, and a companion that
+        # was offered anyway would fail on every call instead of disappearing.
+        graph_schema_tool = self.neo4j_manager.get_schema_tool() if graph_tool else None
+        graph_summary_tool = self.neo4j_manager.get_summary_tool() if graph_tool else None
 
         # Setup Knowledge Base (FAISS + Neo4j hybrid)
         self._knowledge_base = self._setup_knowledge_base()
@@ -486,6 +491,8 @@ class AgentOrchestrator:
             mcp_manager, graph_tool, web_search_tool,
             shodan_tool, google_dork_tool,
             tradecraft_tool,
+            graph_schema_tool=graph_schema_tool,
+            graph_summary_tool=graph_summary_tool,
         )
         # No declared_tool_names filter at startup — only system MCP tools
         # are loaded. User MCPs (with their declared filter) come through

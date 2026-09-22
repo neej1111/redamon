@@ -7,9 +7,34 @@
  *   - PRESET_EXCLUDED_FIELDS set contains exactly the expected fields
  *   - Forward-compatibility: defaults-merge strategy works correctly
  *   - Edge cases: empty objects, unknown fields, nested JSON values
+ *   - Both preset paths are guarded, read from the ProjectForm source
+ *
+ * @vitest-environment node
  */
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+
 import { describe, test, expect } from 'vitest'
-import { PRESET_EXCLUDED_FIELDS, extractPresetSettings } from './project-preset-utils'
+import {
+  engagementLimitFields,
+  engagementRecordFields,
+  fieldsWhere,
+} from './reconSettings/registry'
+
+/** Every file reference: a preset naming one points another project at it. */
+const uploadManaged = () => fieldsWhere(f => f.deny_reason === 'upload-managed')
+import {
+  PRESET_EXCLUDED_FIELDS,
+  extractPresetSettings,
+  stripExcludedOnApply,
+} from './project-preset-utils'
+
+/** The half that is listed by name, because it has no registry classification. */
+const TARGET_IDENTITY = [
+  'targetDomain', 'subdomainList', 'ipMode', 'targetIps',
+  'domainBatchMode', 'domainBatchHosts', 'domainBatchGroups',
+  'name', 'description', 'vhostSniCustomWordlist',
+]
 
 // ============================================================
 // PRESET_EXCLUDED_FIELDS
@@ -43,10 +68,45 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
     expect(PRESET_EXCLUDED_FIELDS.has('vhostSniCustomWordlist')).toBe(true)
   })
 
-  test('has exactly 14 excluded fields', () => {
-    // 11 originally + the three domainBatch* target-identity fields (F3): a
-    // preset that carried them leaked one project's hostname list into another.
-    expect(PRESET_EXCLUDED_FIELDS.size).toBe(14)
+  test('P15: the engagement half is a registry QUERY, not a snapshot of one', () => {
+    // The guard used to be `key.startsWith('roe')`, a string match on a COLUMN
+    // NAME. Those names outlived their meaning: fifteen of them became ordinary
+    // engagement limits and the rest became the contract, so a prefix match
+    // survives that reclassification by accident. Renaming a column or
+    // reclassifying a field must move this set with it, which is only true if it
+    // is derived rather than listed.
+    const expected = new Set([
+      ...TARGET_IDENTITY,
+      ...engagementLimitFields().map(f => f.key),
+      ...engagementRecordFields().map(f => f.key),
+      ...uploadManaged().map(f => f.key),
+    ])
+    expect([...PRESET_EXCLUDED_FIELDS].sort()).toEqual([...expected].sort())
+  })
+
+  test('P15: every engagement limit and every record column is excluded', () => {
+    // Measured before this shipped: a user preset captured 37 engagement
+    // columns, including the rate ceiling, the excluded-host list, the forbidden
+    // tools and seven PII fields. Loading it into another project overwrote that
+    // project's scope controls with the first one's and copied the client's
+    // contact details across.
+    for (const f of [...engagementLimitFields(), ...engagementRecordFields()]) {
+      expect(PRESET_EXCLUDED_FIELDS.has(f.key), f.key).toBe(true)
+    }
+  })
+
+  test('P15: an already-saved preset cannot APPLY one either', () => {
+    // Excluding at CAPTURE only protects presets saved from now on. Every
+    // preset saved before this shipped already contains them, so the apply path
+    // strips them too. Both, not either.
+    const stale = {
+      naabuEnabled: true,
+      roeGlobalMaxRps: 99,
+      roeExcludedHosts: ['other-project.test'],
+      roeClientContactPhone: '+1 555 0100',
+    }
+    const safe = stripExcludedOnApply(stale)
+    expect(safe).toEqual({ naabuEnabled: true })
   })
 
   test('does NOT exclude recon settings fields', () => {
@@ -66,11 +126,13 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
     expect(PRESET_EXCLUDED_FIELDS.has('reconPresetId')).toBe(false)
   })
 
-  test('does NOT exclude RoE text/rule fields (only binary)', () => {
-    expect(PRESET_EXCLUDED_FIELDS.has('roeEnabled')).toBe(false)
-    expect(PRESET_EXCLUDED_FIELDS.has('roeRawText')).toBe(false)
-    expect(PRESET_EXCLUDED_FIELDS.has('roeClientName')).toBe(false)
-    expect(PRESET_EXCLUDED_FIELDS.has('roeForbiddenTools')).toBe(false)
+  test('every roe* column is excluded, one way or the other', () => {
+    // Not by prefix - by classification. Each is either an engagement LIMIT (a
+    // property of one engagement, never of a reusable configuration) or the
+    // engagement RECORD (the client's own details).
+    for (const key of ['roeEnabled', 'roeRawText', 'roeClientName', 'roeForbiddenTools']) {
+      expect(PRESET_EXCLUDED_FIELDS.has(key), key).toBe(true)
+    }
   })
 })
 
@@ -110,6 +172,8 @@ describe('extractPresetSettings', () => {
     expect(result).not.toHaveProperty('roeDocumentName')
     expect(result).not.toHaveProperty('roeDocumentMimeType')
     expect(result).not.toHaveProperty('jsReconUploadedFiles')
+    expect(result).not.toHaveProperty('roeGlobalMaxRps')
+    expect(result).not.toHaveProperty('roeClientName')
 
     // Preserved fields should be present with correct values
     expect(result.naabuEnabled).toBe(true)
@@ -380,8 +444,9 @@ describe('preset roundtrip', () => {
     expect(merged.scanModules).toEqual(['port_scan'])
     expect(merged.agentMaxIterations).toBe(200)
     expect(merged.reconPresetId).toBe('stealth-recon')
-    expect(merged.roeEnabled).toBe(true)
-    expect(merged.roeClientName).toBe('ACME Corp')
+    // The engagement never rides along, in either direction.
+    expect(merged).not.toHaveProperty('roeEnabled')
+    expect(merged).not.toHaveProperty('roeClientName')
 
     // Defaults fill in gaps
     expect(merged.newFutureField).toBe('future')
@@ -533,5 +598,52 @@ describe('domain batch scope never travels through a preset', () => {
     expect(next.targetDomain).toBe('other.example.com')
     // ...while the preset's actual purpose still applied.
     expect(next.naabuTopPorts).toBe('1000')
+  })
+})
+
+
+// --- I1: BOTH preset paths, not one ----------------------------------------------
+
+/**
+ * The two handlers are asserted at the source, not by rendering the form.
+ *
+ * Rendering `ProjectForm` needs the whole provider tree and a `/defaults` fetch,
+ * and what actually went wrong here was structural rather than behavioural:
+ * `applyPreset` had a restore loop and `handleLoadUserPreset` simply did not.
+ * One of the two paths being guarded is the shape this checks.
+ */
+describe('I1: both preset paths are guarded, not just the built-in one', () => {
+  const form = readFileSync(
+    fileURLToPath(new URL('../components/projects/ProjectForm/ProjectForm.tsx', import.meta.url)),
+    'utf8'
+  )
+
+  test('applyPreset restores the excluded set from the current form', () => {
+    // It resets every field that appears in /defaults before applying the
+    // preset, so without this the reset itself would clear the engagement.
+    expect(form).toMatch(/for \(const key of PRESET_EXCLUDED_FIELDS\) next\[key\] = p\[key\]/)
+  })
+
+  test('handleLoadUserPreset strips the excluded set from what it applies', () => {
+    // The half that protects presets people ALREADY saved: 37 engagement
+    // columns are sitting in them right now.
+    const handler = form.slice(form.indexOf('const handleLoadUserPreset'))
+    expect(handler.slice(0, 1200)).toMatch(/stripExcludedOnApply\(settings\)/)
+  })
+
+  test('neither path is keyed on the `roe` name prefix any more', () => {
+    // I2. The columns keep their names while their classification changed, so a
+    // prefix match survives a reclassification by accident - and the obvious
+    // follow-on cleanup ("these are ordinary settings now, drop the loop")
+    // removes a live control with nothing failing.
+    //
+    // Comments are stripped: the line explaining what the prefix loop WAS is
+    // the correction, and flagging it would teach people to delete the
+    // explanation rather than keep the guard.
+    const code = form
+      .split('\n')
+      .filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    expect(code).not.toMatch(/startsWith\('roe'\)/)
   })
 })

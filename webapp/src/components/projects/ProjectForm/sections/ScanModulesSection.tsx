@@ -5,6 +5,7 @@ import { ChevronDown, Layers } from 'lucide-react'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
+import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -146,6 +147,17 @@ export function ScanModulesSection({ data, updateField }: ScanModulesSectionProp
               />
             </div>
           </div>
+
+          {/* A pipeline CAPABILITY rather than a tool's own setting: no section
+              owns the capture proxy, so it sits beside the other pipeline-level
+              toggles rather than in a drawer of its own. */}
+          <RegistryFields
+            keys={['captureProxyEnabled']}
+            data={data}
+            updateField={updateField}
+            title="Traffic capture"
+            description="Route the pipeline's HTTP traffic through the capture proxy so it can be replayed and fuzzed later. Off the scan runs identically and records nothing."
+          />
         </div>
       )}
     </div>

@@ -25,6 +25,9 @@ vi.mock('@/lib/prisma', () => ({
       findUnique: (...a: unknown[]) => mockProjectFindUnique(...a),
       delete: (...a: unknown[]) => mockProjectDelete(...a),
     },
+    // Engagement authorizations are archived before a delete rather than
+    // cascading with it; a project with none needs no archive at all.
+    engagementAuthorization: { count: async () => 0 },
   },
 }))
 vi.mock('@/app/api/graph/neo4j', () => ({ getGraphSession: () => ({ run: vi.fn(), close: vi.fn() }) }))

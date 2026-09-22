@@ -698,7 +698,7 @@ Exact networks: the proxy joins `redamon_pentest-net` only
 [`container_manager.py:942-943`](../../recon_orchestrator/container_manager.py#L942-L943)).
 
 There is also a static `capture` compose profile
-([`docker-compose.yml:889`](../../docker-compose.yml#L889)) that defines the same two
+([`docker-compose.yml:1204`](../../docker-compose.yml#L1204)) that defines the same two
 services for a manual `docker compose --profile capture up`.
 
 ### Settings (database fields)

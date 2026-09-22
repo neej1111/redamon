@@ -680,7 +680,7 @@ allocate_memory() {
     [[ "${BUILD_MEM_MB:-0}" -le 0 ]] && return 0      # RAM undetectable: fail open
 
     local total="$BUILD_MEM_MB"
-    local os_pct svc_pct burst_pct
+    local os_pct svc_pct burst_pct blast_pct
     os_pct="$(_pct_env OS_RESERVE_PCT 8 1 50)"
     svc_pct="$(_pct_env SERVICES_PCT 65 10 95)"
     burst_pct="$(_burst_pct)"
@@ -693,7 +693,8 @@ allocate_memory() {
     # Nothing may take more than this share of the host, so one runaway service
     # cannot starve the databases. Proportional, mirroring PER_CONTAINER_MAX in
     # recon_orchestrator/resource_governor.py.
-    blast_mb=$(( total * "$(_pct_env BLAST_PCT 55 20 90)" / 100 ))
+    blast_pct="$(_pct_env BLAST_PCT 55 20 90)"
+    blast_mb=$(( total * blast_pct / 100 ))
 
     # Parse the specs ONCE into parallel arrays; the passes below then need no
     # re-parsing (and no subshells) per service.
@@ -1833,12 +1834,17 @@ ensure_sca_intel() {
     # with HTTP Traffic Capture on would never trigger one, so the catalog would
     # stay empty and every captured request would silently read as "no match".
     # Seeding it here closes that hole and costs one 5 MB fetch.
-    if [[ "$(_env_get SCA_INTEL_AUTO_REFRESH "$SCRIPT_DIR/.env")" == "false" ]]; then
-        info "SCA_INTEL_AUTO_REFRESH=false; skipping the supply-chain incident catalog (air-gapped)"
-        return 0
-    fi
+    local auto_refresh=true
+    [[ "$(_env_get SCA_INTEL_AUTO_REFRESH "$SCRIPT_DIR/.env")" == "false" ]] && auto_refresh=false
     if ! docker image inspect redamon-supply-chain-analyzer:latest &>/dev/null; then
         warn "Analyzer image not built yet; skipping incident catalog (run './redamon.sh sca-intel-sync' after the build)"
+        return 0
+    fi
+    if [[ "$auto_refresh" == "false" ]]; then
+        # Air-gapped: never fetch, but an empty catalog still gets the bundled
+        # offline copy from disk. A catalog already present is left alone.
+        info "SCA_INTEL_AUTO_REFRESH=false; not contacting the incident feed (air-gapped)"
+        ( cmd_sca_intel_sync --seed-only ) || warn "Could not install the bundled incident catalog (reason above). RedAmon runs normally without it."
         return 0
     fi
     info "Ensuring supply-chain incident catalog"
@@ -1846,7 +1852,7 @@ ensure_sca_intel() {
     # on failure, and a bare `|| warn` cannot catch an exit - it would abort the
     # whole install/update. A missing catalog must degrade to "did not run",
     # never stop the stack coming up.
-    ( cmd_sca_intel_sync ) || warn "Incident catalog sync incomplete; supply-chain findings will carry no incident context until './redamon.sh sca-intel-sync' succeeds. This is not a problem: RedAmon runs normally with the sync off, you just won't see incident context on supply-chain findings."
+    ( cmd_sca_intel_sync ) || warn "Incident catalog not refreshed (the reason is printed above). This is not a problem: install/update continues and RedAmon runs normally; the refresh is retried automatically."
 }
 
 ensure_osv_db() {
@@ -1942,6 +1948,39 @@ ensure_auth_secrets() {
         echo "TRAFFIC_INGEST_DATABASE_URL=postgresql://traffic_ingest:$(openssl rand -hex 32)@postgres:5432/${_ti_db}" >> "$env_file"
         info "Generated TRAFFIC_INGEST_DATABASE_URL (capture ingest role)"
     fi
+    # Inbound MCP server. Written EXPLICITLY as false rather than left unset, so
+    # the operator can see the switch exists and where to flip it. The webapp has
+    # NO env_file, so this is also listed in its compose `environment` block - a
+    # value set only here would otherwise be silently inert.
+    if ! grep -q '^MCP_SERVER_ENABLED=' "$env_file" 2>/dev/null; then
+        echo "MCP_SERVER_ENABLED=false" >> "$env_file"
+        info "Initialized MCP_SERVER_ENABLED=false (inbound MCP server off by default)"
+    fi
+}
+
+# Refuse to run the inbound MCP server while the agent's auth is fail-open.
+#
+# `_key_ok` in agentic/llm_guard.py accepts ANY key when neither INTERNAL_API_KEY
+# nor SCANNER_API_KEY is set, and the base compose publishes the agent on
+# 0.0.0.0:8090. Enabling an internet-reachable inbound surface on top of that
+# would mean the whole graph-isolation story rests on a check that is not
+# running. Called from install/update/up, after ensure_auth_secrets.
+mcp_server_preflight() {
+    local env_file="$SCRIPT_DIR/.env"
+    local enabled internal
+    enabled="$(_env_get MCP_SERVER_ENABLED "$env_file")"
+    [[ "$enabled" == "true" || "$enabled" == "1" ]] || return 0
+
+    internal="$(_env_get INTERNAL_API_KEY "$env_file")"
+    if [[ -z "$internal" || "$internal" == "changeme" ]]; then
+        error "MCP_SERVER_ENABLED=true but INTERNAL_API_KEY is unset or 'changeme'."
+        error "The agent's auth fails OPEN in that state, and its port is published"
+        error "on 0.0.0.0 in docker-compose.yml. Refusing to enable the inbound MCP"
+        error "server. Run './redamon.sh install' to generate the secrets, or set"
+        error "MCP_SERVER_ENABLED=false in .env."
+        return 1
+    fi
+    return 0
 }
 
 # Compose project name (used to resolve the data-volume names). Must match
@@ -3025,6 +3064,7 @@ cmd_install() {
 
     # Generate auth secrets if not present
     ensure_auth_secrets
+    mcp_server_preflight || exit 1
     ensure_volume_ownership
     ensure_db_secrets
     # Pin a strong GVM admin password BEFORE `up`, so the orchestrator starts with
@@ -3393,6 +3433,7 @@ cmd_update() {
     # next recreate. Generating first guarantees a single `update` fully enforces.
     # Both are idempotent (append-if-absent), so this is a no-op once present.
     ensure_auth_secrets
+    mcp_server_preflight || exit 1
     ensure_volume_ownership
     ensure_db_secrets
     # Same generate-before-recreate ordering as the DB/auth secrets: pin
@@ -3634,8 +3675,15 @@ cmd_supply_chain_sync() {
 
 cmd_sca_intel_sync() {
     local analyzer_img="redamon-supply-chain-analyzer:latest"
-    local force=""
-    [[ "${1:-}" == "--force" ]] && force="--force"
+    # --seed-only: install the bundled offline copy into an empty volume and never
+    # contact the feed. Used by ensure_sca_intel when SCA_INTEL_AUTO_REFRESH=false.
+    local mode="" net_args=()
+    case "${1:-}" in
+        --force)     mode="--force" ;;
+        --seed-only) mode="--seed-only"; net_args=(--network none) ;;
+        "") ;;
+        *) error "Unknown flag: $1 (expected --force or --seed-only)"; exit 1 ;;
+    esac
     export_version
     if ! docker image inspect "$analyzer_img" &>/dev/null; then
         info "Supply-chain analyzer image not found, building it (first time only)..."
@@ -3645,22 +3693,33 @@ cmd_sca_intel_sync() {
         fi
     fi
     docker volume inspect redamon-sca-intel &>/dev/null || docker volume create redamon-sca-intel >/dev/null
-    info "Syncing supply-chain incident intel (supplychainattack.org, ~5 MB)."
+    if [[ "$mode" == "--seed-only" ]]; then
+        info "Installing the bundled offline incident catalog if the volume is empty (no network)."
+    else
+        info "Syncing supply-chain incident intel (supplychainattack.org, ~5 MB)."
+    fi
     # Same two rules as cmd_supply_chain_sync above:
     #   --user root       the volume is root-owned and read-only to every scanner
     #   supply_chain_common bind-mount is MANDATORY - intel_sync.py is our module
     #                     and is NOT baked into the analyzer image, so without
     #                     this the run dies with ModuleNotFoundError.
-    if docker run --rm --user root \
+    # --network none in seed-only mode makes "never contacts the feed" a property
+    # of the container, not just of the code path.
+    if docker run --rm --user root ${net_args[@]+"${net_args[@]}"} \
         -v redamon-sca-intel:/sca-intel \
         -v "$SCRIPT_DIR/scanners/supply_chain_common:/app/supply_chain_common:ro" \
         -e PYTHONPATH=/app \
         --entrypoint python3 \
         "$analyzer_img" \
-        -m supply_chain_common.intel_sync --out /sca-intel $force; then
-        success "Supply-chain incident intel sync complete."
+        -m supply_chain_common.intel_sync --out /sca-intel $mode; then
+        # The sync printed what happened (synced, up to date, or bundled offline
+        # copy installed because the feed is down); all three leave a usable catalog.
+        success "Supply-chain incident intel ready."
     else
-        error "Supply-chain incident intel sync failed."
+        # warn, not error: the reason line above says whether a stored catalog was
+        # kept, and RedAmon runs normally either way. The exit code still says the
+        # refresh did not happen.
+        warn "Supply-chain incident intel was not refreshed (reason above). RedAmon runs normally."
         exit 1
     fi
 }
@@ -3779,6 +3838,7 @@ cmd_up_dev() {
 
     ensure_tool_images
     ensure_auth_secrets
+    mcp_server_preflight || exit 1
     ensure_volume_ownership
     ensure_osv_db
     ensure_sca_intel
@@ -3880,6 +3940,7 @@ cmd_up() {
 
     ensure_tool_images
     ensure_auth_secrets
+    mcp_server_preflight || exit 1
     ensure_volume_ownership
     ensure_osv_db
     ensure_sca_intel
@@ -4436,7 +4497,7 @@ cmd_help() {
     echo -e "  ${GREEN}reset-password${NC}   Reset an existing user's password"
     echo -e "  ${GREEN}kb <command>${NC}     Knowledge Base management (build/update/rebuild/stats)"
     echo -e "  ${GREEN}supply-chain-sync [ecos]${NC}  Populate the offline OSV DB (default: npm; e.g. 'npm PyPI Go')"
-    echo -e "  ${GREEN}sca-intel-sync [--force]${NC}  Populate the supply-chain incident intel (supplychainattack.org)"
+    echo -e "  ${GREEN}sca-intel-sync [--force|--seed-only]${NC}  Populate the supply-chain incident intel (supplychainattack.org; --seed-only installs the bundled offline copy, no network)"
     echo -e "  ${GREEN}test [tier]${NC}      Run the test suite: unit (default) | integration | live | all | coverage"
     echo -e "  ${GREEN}help${NC}             Show this help message"
     echo ""
@@ -4473,13 +4534,13 @@ cmd_help() {
 # The root `tests/` dir is a grab-bag: most files exercise the agent image, but a
 # set of them import recon enrichment modules (recon/main_recon_modules/*) and so
 # must run in the recon image, not the agent image. We route them explicitly.
-_ROOT_RECON_TESTS="test_censys_enrich.py,test_criminalip_enrich.py,test_fofa_enrich.py,test_netlas_enrich.py,test_otx_enrich.py,test_uncover_enrich.py,test_virustotal_enrich.py,test_zoomeye_enrich.py,test_gau_parallel.py,test_gau_urlscan_api_key.py,test_recon_mixin_split.py,test_custom_templates_integration.py,test_masscan_integration.py"
+_ROOT_RECON_TESTS="test_censys_enrich.py,test_criminalip_enrich.py,test_fofa_enrich.py,test_netlas_enrich.py,test_otx_enrich.py,test_uncover_enrich.py,test_virustotal_enrich.py,test_zoomeye_enrich.py,test_gau_parallel.py,test_gau_urlscan_api_key.py,test_recon_mixin_split.py,test_custom_templates_integration.py,test_masscan_integration.py,test_registry_tool_wiring.py"
 
 # Section spec: name|image|workdir|PYTHONPATH|testpaths|covpkg|exclude
 _TEST_SECTIONS=(
     "agent|redamon-agent|/repo/agentic|/repo/agentic:/repo:/repo/mcp/servers:/repo/recon_orchestrator:/repo/services|tests|.|"
     "root-agent|redamon-agent|/repo|/repo:/repo/agentic:/repo/mcp/servers:/repo/services:/repo/scanners|tests scanners/supply_chain_common scanners/supply_chain_analyzer scanners/supply_chain_scan graph_db services/knowledge_base mcp|supply_chain_common|${_ROOT_RECON_TESTS}"
-    "root-recon|redamon-recon|/repo|/repo:/repo/recon:/repo/recon/main_recon_modules|tests|.|"
+    "root-recon|redamon-recon|/repo|/repo:/repo/recon:/repo/recon/main_recon_modules:/repo/scanners|tests|.|"
     "recon|redamon-recon|/repo/recon|/repo/recon:/repo|tests|.|"
     "recon_orchestrator|redamon-recon-orchestrator|/repo/recon_orchestrator|/repo/recon_orchestrator:/repo|.|.|"
     "ai_attack_surface|redamon-ai-attack-surface|/repo/scanners/ai_attack_surface_scan|/repo/scanners/ai_attack_surface_scan:/repo|tests adapters|.|"
@@ -4492,12 +4553,52 @@ _TEST_SECTIONS=(
 _ROOT_RECON_PATHS=""
 for _f in ${_ROOT_RECON_TESTS//,/ }; do _ROOT_RECON_PATHS="$_ROOT_RECON_PATHS tests/$_f"; done
 
+# A section, a shell suite or the webapp suite that cannot run is a gate
+# FAILURE, not a skip. A green run that never executed the tests is worse than a
+# red one: it reports that a control holds when nothing checked it.
+#
+# `REDAMON_TEST_ALLOW_MISSING` is the deliberate, named opt-out for a working
+# copy that genuinely lacks an input (comma-separated section names, or `all`).
+# It prints a line containing the word SKIPPED so the hole is visible in any log
+# rather than being inferable only from a count.
+_test_section_may_skip() {
+    local name="$1"
+    local allow="${REDAMON_TEST_ALLOW_MISSING:-}"
+    [[ -z "$allow" ]] && return 1
+    [[ "$allow" == "all" ]] && return 0
+    local entry
+    local -a _allow_list
+    IFS=',' read -ra _allow_list <<< "$allow"
+    for entry in "${_allow_list[@]}"; do
+        [[ "${entry// /}" == "$name" ]] && return 0
+    done
+    return 1
+}
+
+_test_missing_input() {
+    local name="$1" what="$2" fix="$3" tier="$4"
+    if [[ "$tier" != "unit" && "$tier" != "all" && "$tier" != "coverage" ]]; then
+        warn "SKIP section '$name' ($what)"
+        return 0
+    fi
+    if _test_section_may_skip "$name"; then
+        error "SKIPPED section '$name' ($what) — allowed by REDAMON_TEST_ALLOW_MISSING"
+        return 0
+    fi
+    error "section '$name' CANNOT RUN: $what"
+    error "  This fails the gate rather than skipping: a suite that never ran proves nothing."
+    error "  Fix: $fix"
+    error "  Or, deliberately: REDAMON_TEST_ALLOW_MISSING=$name ./redamon.sh test $tier"
+    return 1
+}
+
 _test_run_section() {
     local name="$1" image="$2" workdir="$3" pypath="$4" testpaths="$5" covpkg="$6" exclude="$7"
     local tier="$8"
     if ! docker image inspect "$image" >/dev/null 2>&1; then
-        warn "SKIP section '$name' ($image not built)"
-        return 0
+        _test_missing_input "$name" "$image is not built" \
+            "./redamon.sh install  (or: docker compose build ${image#redamon-})" "$tier"
+        return $?
     fi
     # root-recon runs ONLY the recon-oriented files from tests/, in the recon image.
     if [[ "$name" == "root-recon" ]]; then
@@ -4558,7 +4659,7 @@ cmd_test() {
     # Shell (bash) — the redamon.sh/deploy logic the Python sections cannot reach.
     # Same tiers as webapp: these suites are hermetic, so they belong in the gate.
     if [[ "$tier" == "all" || "$tier" == "coverage" || "$tier" == "unit" ]]; then
-        _test_run_shell || failed=1
+        _test_run_shell "$tier" || failed=1
     fi
     # Webapp (vitest) — only for the broader tiers; needs node_modules.
     if [[ "$tier" == "all" || "$tier" == "coverage" || "$tier" == "unit" ]]; then
@@ -4578,8 +4679,9 @@ cmd_test() {
 _test_run_shell() {
     local files=("$SCRIPT_DIR"/tests/*_test.sh)
     if [[ ! -e "${files[0]}" ]]; then
-        warn "SKIP shell suites (no tests/*_test.sh found)"
-        return 0
+        _test_missing_input "shell" "no tests/*_test.sh were found" \
+            "check out the tests/ directory" "${1:-unit}"
+        return $?
     fi
     info "=== section: shell (bash) ==="
     local f name rc shell_failed=0 passed=0
@@ -4609,8 +4711,9 @@ _test_run_shell() {
 _test_run_webapp() {
     local tier="$1"
     if [[ ! -x "$SCRIPT_DIR/webapp/node_modules/.bin/vitest" ]]; then
-        warn "SKIP webapp vitest (webapp/node_modules absent; run in the webapp image or 'npm ci')"
-        return 0
+        _test_missing_input "webapp" "webapp/node_modules is absent, so vitest cannot run" \
+            "cd webapp && npm ci" "$tier"
+        return $?
     fi
     info "=== section: webapp (vitest) ==="
     if [[ "$tier" == "coverage" ]]; then

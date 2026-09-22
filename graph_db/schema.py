@@ -81,103 +81,84 @@ DROP_LEGACY_CONSTRAINTS = [
     "DROP INDEX idx_exploit_type IF EXISTS",
 ]
 
-# Uniqueness constraints (tenant-scoped for per-project nodes, global for shared reference nodes)
-CONSTRAINTS = [
-    "CREATE CONSTRAINT domain_unique IF NOT EXISTS FOR (d:Domain) REQUIRE (d.name, d.user_id, d.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT subdomain_unique IF NOT EXISTS FOR (s:Subdomain) REQUIRE (s.name, s.user_id, s.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT ip_unique IF NOT EXISTS FOR (i:IP) REQUIRE (i.address, i.user_id, i.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT baseurl_unique IF NOT EXISTS FOR (u:BaseURL) REQUIRE (u.url, u.user_id, u.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT port_unique IF NOT EXISTS FOR (p:Port) REQUIRE (p.number, p.protocol, p.ip_address, p.user_id, p.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT service_unique IF NOT EXISTS FOR (svc:Service) REQUIRE (svc.name, svc.port_number, svc.ip_address, svc.user_id, svc.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT technology_unique IF NOT EXISTS FOR (t:Technology) REQUIRE (t.name, t.version, t.user_id, t.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT endpoint_unique IF NOT EXISTS FOR (e:Endpoint) REQUIRE (e.path, e.method, e.baseurl, e.user_id, e.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT parameter_unique IF NOT EXISTS FOR (p:Parameter) REQUIRE (p.name, p.position, p.endpoint_path, p.baseurl, p.user_id, p.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT header_unique IF NOT EXISTS FOR (h:Header) REQUIRE (h.name, h.value, h.baseurl, h.user_id, h.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT dnsrecord_unique IF NOT EXISTS FOR (dns:DNSRecord) REQUIRE (dns.type, dns.value, dns.subdomain, dns.user_id, dns.project_id) IS UNIQUE",
-    # Keyed on cert_key (fingerprint-derived, surrogate fallback), NOT subject_cn.
-    # NEW NAME is mandatory: a same-name CREATE IF NOT EXISTS against a DB that
-    # still has the old constraint is a silent no-op (see backfill_cert_key).
-    #
-    # ROLLBACK, written down before anyone needs it at 2am:
-    #
-    #   DROP CONSTRAINT certificate_key_unique IF EXISTS;
-    #   CREATE CONSTRAINT certificate_unique IF NOT EXISTS
-    #     FOR (c:Certificate) REQUIRE (c.subject_cn, c.user_id, c.project_id) IS UNIQUE;
-    #
-    # That recreate FAILS if the re-keyed data already holds two certificates
-    # sharing a subject_cn -- which is the entire reason this key exists, so on a
-    # real install it is the expected outcome, not the exception. A true rollback
-    # therefore also requires deleting the surplus, keeping the most recent
-    # updated_at per subject_cn:
-    #
-    #   MATCH (c:Certificate)
-    #   WITH c.subject_cn AS cn, c.user_id AS u, c.project_id AS p, c
-    #   ORDER BY c.updated_at DESC          // ORDER BY *before* collect, or the
-    #   WITH cn, u, p, collect(c) AS certs  // list order is arbitrary and the
-    #   WHERE size(certs) > 1               // survivor is a coin flip
-    #   UNWIND certs[1..] AS dup
-    #   DETACH DELETE dup
-    #
-    # The DECISION if that is unacceptable: leave the constraint dropped. An
-    # unconstrained Certificate label duplicates on re-scan but loses nothing,
-    # whereas deleting certificates to satisfy a rolled-back key is irreversible.
-    "CREATE CONSTRAINT certificate_key_unique IF NOT EXISTS FOR (c:Certificate) REQUIRE (c.cert_key, c.user_id, c.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT traceroute_unique IF NOT EXISTS FOR (tr:Traceroute) REQUIRE (tr.target_ip, tr.user_id, tr.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT cve_unique IF NOT EXISTS FOR (c:CVE) REQUIRE c.id IS UNIQUE",
-    "CREATE CONSTRAINT mitredata_unique IF NOT EXISTS FOR (m:MitreData) REQUIRE m.id IS UNIQUE",
-    "CREATE CONSTRAINT capec_unique IF NOT EXISTS FOR (cap:Capec) REQUIRE cap.capec_id IS UNIQUE",
-    # ── Per-project findings: keyed on (id, tenant), never on id alone ───────
-    # See DROP_LEGACY_CONSTRAINTS above for what an id-only key did to two
-    # projects scanning the same target. The `_tenant_unique` suffix is a NEW
-    # name on purpose: a same-name CREATE IF NOT EXISTS would silently keep the
-    # old, global constraint.
-    "CREATE CONSTRAINT vulnerability_tenant_unique IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.id, v.user_id, v.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT exploitgvm_tenant_unique IF NOT EXISTS FOR (e:ExploitGvm) REQUIRE (e.id, e.user_id, e.project_id) IS UNIQUE",
-    # GitHub Secret Hunt constraints
-    "CREATE CONSTRAINT githubhunt_tenant_unique IF NOT EXISTS FOR (gh:GithubHunt) REQUIRE (gh.id, gh.user_id, gh.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT githubrepo_tenant_unique IF NOT EXISTS FOR (gr:GithubRepository) REQUIRE (gr.id, gr.user_id, gr.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT githubpath_tenant_unique IF NOT EXISTS FOR (gp:GithubPath) REQUIRE (gp.id, gp.user_id, gp.project_id) IS UNIQUE",
-    # Supply-chain feature (plan Phase 2/4): Package + MalPackageFinding, shared by L1 + L2.
-    "CREATE CONSTRAINT package_unique IF NOT EXISTS FOR (p:Package) REQUIRE (p.purl, p.user_id, p.project_id) IS UNIQUE",
-    # Anchor for packages read out of an operator-uploaded SBOM/lockfile.
-    "CREATE CONSTRAINT sbomdoc_tenant_unique IF NOT EXISTS FOR (d:SbomDocument) REQUIRE (d.id, d.user_id, d.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT malpackagefinding_unique IF NOT EXISTS FOR (mf:MalPackageFinding) REQUIRE (mf.finding_id, mf.user_id, mf.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT githubsecret_tenant_unique IF NOT EXISTS FOR (gs:GithubSecret) REQUIRE (gs.id, gs.user_id, gs.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT githubsensitivefile_tenant_unique IF NOT EXISTS FOR (gsf:GithubSensitiveFile) REQUIRE (gsf.id, gsf.user_id, gsf.project_id) IS UNIQUE",
-    # TruffleHog Secret Scanner constraints. Tenant-scoped (id, user_id,
-    # project_id), matching the MERGE key: an id-only constraint plus a project
-    # import that re-owns the tenant props WITHOUT rewriting the embedded id left
-    # the two disagreeing about who owns the node.
-    "CREATE CONSTRAINT multiscannerscan_unique IF NOT EXISTS FOR (ts:MultiscannerScan) REQUIRE (ts.id, ts.user_id, ts.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT multiscannerrepository_unique IF NOT EXISTS FOR (tr:MultiscannerRepository) REQUIRE (tr.id, tr.user_id, tr.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT multiscannerfinding_unique IF NOT EXISTS FOR (tf:MultiscannerFinding) REQUIRE (tf.id, tf.user_id, tf.project_id) IS UNIQUE",
-    # Four asset labels for the non-git sources. Grouped by asset SHAPE, not one
-    # per source: the graph renderer draws a node from labels[0] (a single label,
-    # unordered by Neo4j), so a node may carry only one.
-    "CREATE CONSTRAINT multiscannerimage_unique IF NOT EXISTS FOR (ti:MultiscannerImage) REQUIRE (ti.id, ti.user_id, ti.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT multiscannermodel_unique IF NOT EXISTS FOR (tm:MultiscannerModel) REQUIRE (tm.id, tm.user_id, tm.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT multiscannerbucket_unique IF NOT EXISTS FOR (tb:MultiscannerBucket) REQUIRE (tb.id, tb.user_id, tb.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT multiscannerendpoint_unique IF NOT EXISTS FOR (te:MultiscannerEndpoint) REQUIRE (te.id, te.user_id, te.project_id) IS UNIQUE",
-    # JS Recon Scanner constraints
-    "CREATE CONSTRAINT jsreconfinding_tenant_unique IF NOT EXISTS FOR (jf:JsReconFinding) REQUIRE (jf.id, jf.user_id, jf.project_id) IS UNIQUE",
-    # Secret constraints
-    "CREATE CONSTRAINT secret_tenant_unique IF NOT EXISTS FOR (s:Secret) REQUIRE (s.id, s.user_id, s.project_id) IS UNIQUE",
-    # External Domain constraints
-    "CREATE CONSTRAINT externaldomain_unique IF NOT EXISTS FOR (ed:ExternalDomain) REQUIRE (ed.domain, ed.user_id, ed.project_id) IS UNIQUE",
-    # OTX Threat Intelligence constraints
-    "CREATE CONSTRAINT threatpulse_unique IF NOT EXISTS FOR (tp:ThreatPulse) REQUIRE (tp.pulse_id, tp.user_id, tp.project_id) IS UNIQUE",
-    "CREATE CONSTRAINT malware_unique IF NOT EXISTS FOR (m:Malware) REQUIRE (m.hash, m.user_id, m.project_id) IS UNIQUE",
-    # Attack Chain Graph constraints
-    "CREATE CONSTRAINT attack_chain_id IF NOT EXISTS FOR (ac:AttackChain) REQUIRE ac.chain_id IS UNIQUE",
-    "CREATE CONSTRAINT chain_step_id IF NOT EXISTS FOR (s:ChainStep) REQUIRE s.step_id IS UNIQUE",
-    "CREATE CONSTRAINT chain_finding_id IF NOT EXISTS FOR (f:ChainFinding) REQUIRE f.finding_id IS UNIQUE",
-    "CREATE CONSTRAINT chain_decision_id IF NOT EXISTS FOR (d:ChainDecision) REQUIRE d.decision_id IS UNIQUE",
-    "CREATE CONSTRAINT chain_failure_id IF NOT EXISTS FOR (fl:ChainFailure) REQUIRE fl.failure_id IS UNIQUE",
-    # Knowledge Base — base constraint (not tenant-scoped, content is universal)
-    "CREATE CONSTRAINT kb_chunk_id IF NOT EXISTS FOR (c:KBChunk) REQUIRE c.chunk_id IS UNIQUE",
-    # Partial Recon — user-provided inputs for per-tool partial recon runs
-    "CREATE CONSTRAINT userinput_tenant_unique IF NOT EXISTS FOR (ui:UserInput) REQUIRE (ui.id, ui.user_id, ui.project_id) IS UNIQUE",
-]
+# Uniqueness constraints, GENERATED from the single label-key declaration in
+# schema_keys.py. They used to be 45 hand-written strings here, which meant a new
+# node label had to be added in two places - the constraint list and the schema
+# documentation - and forgetting either failed silently: no error, just a label
+# the agent could never query or a MERGE with no uniqueness guarantee.
+#
+# tests/test_schema_constraints_generated.py asserts the generated statements are
+# byte-identical to the frozen originals, so this is a refactor of WHERE the
+# declaration lives, never of what the database gets.
+#
+# The import is INSIDE the function, not at module level. `graph_db/__init__.py`
+# imports the client, which imports base_mixin, which imports THIS module - so a
+# module-level `from graph_db.schema_keys import ...` re-enters the package while
+# schema.py is only partway executed, and `init_schema` (defined further down) is
+# not yet bound. The failure surfaces as a confusing
+# "cannot import name 'init_schema' from 'graph_db.schema'".
+
+
+def _sibling(name):
+    """A sibling module of graph_db, however this module was loaded.
+
+    Tests load schema.py BY PATH, with neither `graph_db` importable as a
+    package nor its directory on sys.path, so both import forms fail there.
+    Resolving the sibling file relative to __file__ works in every case: as a
+    package member, as a bare module, and as a path-loaded one.
+    """
+    import importlib
+
+    try:
+        return importlib.import_module(f"graph_db.{name}")
+    except ImportError:
+        pass
+
+    import importlib.util
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _key_constraints():
+    """The label-key declaration, however this module was loaded."""
+    try:
+        from graph_db.schema_keys import KEY_CONSTRAINTS
+
+        return KEY_CONSTRAINTS
+    except ImportError:
+        return _sibling("schema_keys").KEY_CONSTRAINTS
+
+
+def build_constraints() -> list:
+    """Render CREATE CONSTRAINT statements from the label-key declaration."""
+    out = []
+    for k in _key_constraints():
+        keys = ", ".join(f"{k['var']}.{p}" for p in k["key_properties"])
+        inner = f"({keys})" if len(k["key_properties"]) > 1 else keys
+        out.append(
+            f"CREATE CONSTRAINT {k['constraint']} IF NOT EXISTS "
+            f"FOR ({k['var']}:{k['label']}) REQUIRE {inner} IS UNIQUE"
+        )
+    return out
+
+
+def __getattr__(name):
+    """Defer CONSTRAINTS until first use (PEP 562).
+
+    Building it at module level would run the schema_keys import during the
+    circular-import window described above. Every consumer reads it inside
+    init_schema or a test, long after the package has finished loading.
+    """
+    if name == "CONSTRAINTS":
+        value = build_constraints()
+        globals()["CONSTRAINTS"] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Tenant composite indexes (one per node type for efficient per-project queries)
 TENANT_INDEXES = [
@@ -652,6 +633,56 @@ def backfill_cert_key(session):
               "connection (no marker written)")
 
 
+TECH_IDENTITY_MARKER = "technology-identity-v1"
+
+
+def consolidate_technology_identity(session):
+    """Fold the Technology duplicates written before the writers resolved
+    identity (see technology_identity.fold_technology_duplicates).
+
+    A node kept because it holds a relationship type the fold does not know
+    does not block the marker: a retry would meet the same edge. Only an error
+    leaves the marker unwritten.
+    """
+    if _migration_applied(session, TECH_IDENTITY_MARKER):
+        return
+
+    try:
+        stats = _sibling("technology_identity").fold_technology_duplicates(session)
+    except Exception as e:
+        print(f"[!][graph-db] Technology identity fold incomplete; retried on the "
+              f"next connection (no marker written): {e}")
+        return
+
+    _mark_migration_applied(session, TECH_IDENTITY_MARKER)
+    if stats["folded"] or stats["versioned"]:
+        print(f"[graph-db] Technology identity: folded {stats['folded']} duplicate(s), "
+              f"gave {stats['versioned']} versionless node(s) version ''")
+
+
+RESOLVES_TO_IDENTITY_MARKER = "resolves-to-identity-v1"
+
+
+def consolidate_resolves_to_identity(session):
+    """Fold the parallel RESOLVES_TO edges written before the writers stopped
+    putting properties in the MERGE pattern (see
+    resolves_to_identity.fold_resolves_to_duplicates)."""
+    if _migration_applied(session, RESOLVES_TO_IDENTITY_MARKER):
+        return
+
+    try:
+        stats = _sibling("resolves_to_identity").fold_resolves_to_duplicates(session)
+    except Exception as e:
+        print(f"[!][graph-db] RESOLVES_TO identity fold incomplete; retried on the "
+              f"next connection (no marker written): {e}")
+        return
+
+    _mark_migration_applied(session, RESOLVES_TO_IDENTITY_MARKER)
+    if stats["folded"]:
+        print(f"[graph-db] RESOLVES_TO identity: removed {stats['folded']} parallel "
+              f"edge(s) across {stats['pairs']} Subdomain->IP pair(s)")
+
+
 def init_schema(session):
     """
     Initialize constraints and indexes for the graph schema.
@@ -664,6 +695,8 @@ def init_schema(session):
     backfill_updated_at(session)
     strip_reference_node_tenant(session)
     backfill_cert_key(session)
+    consolidate_technology_identity(session)
+    consolidate_resolves_to_identity(session)
 
     for stmt in DROP_LEGACY_CONSTRAINTS:
         try:
@@ -671,7 +704,10 @@ def init_schema(session):
         except Exception:
             pass
 
-    for query in CONSTRAINTS + TENANT_INDEXES + ADDITIONAL_INDEXES:
+    # build_constraints() rather than the module global: PEP 562 __getattr__
+    # only intercepts attribute access from OUTSIDE, so a bare name here would
+    # raise NameError.
+    for query in build_constraints() + TENANT_INDEXES + ADDITIONAL_INDEXES:
         try:
             session.run(query)
         except Exception as e:

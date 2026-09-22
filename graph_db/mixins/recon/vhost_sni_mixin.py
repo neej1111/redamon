@@ -2,12 +2,17 @@
 VHost & SNI enumeration graph updates.
 
 Writes Vulnerability nodes with source="vhost_sni_enum" that reuse the existing
-Vulnerability label (no new node type). Each finding is attached to the
-Subdomain node corresponding to the discovered hidden vhost. The IP node is
-also enriched with vhost_* properties (baseline, reverse-proxy flag, hidden
-vhost count). When the module discovers a hidden vhost and inject_discovered
-is enabled, a BaseURL is also created so downstream tools (Nuclei, Katana in
-follow-up partial recon runs) can pick it up.
+Vulnerability label. A hidden vhost is a routing fact, never a DNS one, so this
+module writes no RESOLVES_TO edge: a server answering for a Host header does not
+mean a resolver would return that IP, and behind a shared proxy it usually would
+not. Each finding still has to be reachable from the graph, so it is attached to
+the Subdomain for an in-scope hostname (created if recon has not seen it yet,
+flagged has_dns_records=false until a resolver confirms it) or to the IP that
+served it for an out-of-scope one. The IP node is also enriched with vhost_*
+properties (baseline, reverse-proxy flag, hidden vhost count). When the module
+discovers a hidden vhost and inject_discovered is enabled, a BaseURL is created
+so downstream tools (Nuclei, Katana in follow-up partial recon runs) can pick it
+up, owned by its Subdomain or, failing that, by the Service it was served from.
 
 Properties written on each Vulnerability:
     id                       deterministic hash (hostname+ip+port+layer)
@@ -30,7 +35,7 @@ Properties written on each Vulnerability:
     internal_pattern_match   matched internal-keyword (e.g. "admin"), or None
     first_seen, last_seen    ISO timestamps
 
-Properties enriched on existing Subdomain nodes:
+Properties written on the Subdomain for an in-scope hidden vhost:
     vhost_tested, vhost_hidden, vhost_routing_layer, vhost_status_code,
     vhost_size_delta, sni_routed, vhost_tested_at
 
@@ -58,6 +63,7 @@ class VhostSniMixin:
             "ips_enriched": 0,
             "baseurls_created": 0,
             "relationships_created": 0,
+            "stale_dns_edges_removed": 0,
             "errors": [],
         }
 
@@ -74,6 +80,15 @@ class VhostSniMixin:
             or recon_data.get("metadata", {}).get("target", "")
             or ""
         ).strip().lower()
+
+        # Which address each discovered_baseurls entry was served from; the URL
+        # carries its own port but no IP, and section 3 needs one to reach the
+        # Service node.
+        finding_ip_by_host: dict = {}
+        for f in findings:
+            host_key = (f.get("hostname") or "").strip().lower()
+            if host_key and f.get("ip") and host_key not in finding_ip_by_host:
+                finding_ip_by_host[host_key] = f.get("ip")
 
         with self.driver.session() as session:
             # ----------------------------------------------------------
@@ -111,7 +126,7 @@ class VhostSniMixin:
                     stats["errors"].append(f"vhost_sni IP {ip_addr} enrichment failed: {e}")
 
             # ----------------------------------------------------------
-            # 2. Per-finding Vulnerability nodes + Subdomain enrichment
+            # 2. Per-finding Vulnerability nodes + existing Subdomain enrichment
             # ----------------------------------------------------------
             for finding in findings:
                 try:
@@ -166,7 +181,13 @@ class VhostSniMixin:
                     )
                     stats["vulnerabilities_created"] += 1
 
-                    # Attach to Subdomain (creating defensively if missing).
+                    # A hidden vhost proves routing, not DNS: the candidate may
+                    # exist in no public zone at all, and that is exactly the
+                    # finding worth keeping. An in-scope name therefore still
+                    # gets its Subdomain so the finding stays reachable from the
+                    # graph, flagged has_dns_records=false until a resolver says
+                    # otherwise. An out-of-scope name (a co-hosted third party)
+                    # hangs off the IP that served it instead.
                     sub_props = {
                         "vhost_tested": True,
                         "vhost_hidden": True,
@@ -178,30 +199,67 @@ class VhostSniMixin:
                     }
                     sub_props = {k: v for k, v in sub_props.items() if v is not None}
 
-                    session.run(
-                        """
-                        MERGE (s:Subdomain {name: $hostname, user_id: $uid, project_id: $pid})
-                        ON CREATE SET s.source = 'vhost_sni_enum',
-                                      s.created_at = datetime()
-                        SET s += $sprops,
-                            s.updated_at = datetime()
-                        WITH s
-                        MATCH (v:Vulnerability {id: $id, user_id: $uid, project_id: $pid})
-                        MERGE (s)-[:HAS_VULNERABILITY]->(v)
-                        """,
-                        hostname=hostname, uid=user_id, pid=project_id,
-                        id=vuln_id, sprops=sub_props,
-                    )
-                    stats["subdomains_enriched"] += 1
-                    stats["relationships_created"] += 1
+                    is_child = _is_child_of(hostname, target_domain)
 
-                    # Wire the Subdomain into the rest of the graph so it isn't
-                    # orphaned when vhost_sni invented it (a newly discovered
-                    # hidden vhost won't exist as a Subdomain yet). Link to the
-                    # parent Domain (BELONGS_TO/HAS_SUBDOMAIN) when the hostname
-                    # falls under the project's target domain, and to the IP
-                    # (RESOLVES_TO) it was discovered on.
-                    if target_domain and hostname.endswith(target_domain) and hostname != target_domain:
+                    if is_child:
+                        session.run(
+                            """
+                            MERGE (s:Subdomain {name: $hostname, user_id: $uid,
+                                                project_id: $pid})
+                            ON CREATE SET s.source = 'vhost_sni_enum',
+                                          s.has_dns_records = false,
+                                          s.created_at = datetime()
+                            SET s += $sprops,
+                                s.updated_at = datetime()
+                            WITH s
+                            MATCH (v:Vulnerability {id: $id, user_id: $uid,
+                                                    project_id: $pid})
+                            MERGE (s)-[:HAS_VULNERABILITY]->(v)
+                            """,
+                            hostname=hostname, uid=user_id, pid=project_id,
+                            id=vuln_id, sprops=sub_props,
+                        )
+                        stats["subdomains_enriched"] += 1
+                        stats["relationships_created"] += 1
+                    else:
+                        res_sub = session.run(
+                            """
+                            OPTIONAL MATCH (s:Subdomain {
+                                name: $hostname, user_id: $uid, project_id: $pid
+                            })
+                            WITH s
+                            MATCH (v:Vulnerability {
+                                id: $id, user_id: $uid, project_id: $pid
+                            })
+                            FOREACH (_ IN CASE WHEN s IS NOT NULL THEN [1] ELSE [] END |
+                                SET s += $sprops,
+                                    s.updated_at = datetime()
+                                MERGE (s)-[:HAS_VULNERABILITY]->(v)
+                            )
+                            RETURN count(s) AS matched
+                            """,
+                            hostname=hostname, uid=user_id, pid=project_id,
+                            id=vuln_id, sprops=sub_props,
+                        )
+                        if res_sub.single()["matched"] > 0:
+                            stats["subdomains_enriched"] += 1
+                            stats["relationships_created"] += 1
+                        elif ip_addr:
+                            res_anchor = session.run(
+                                """
+                                MATCH (i:IP {address: $addr, user_id: $uid,
+                                             project_id: $pid})
+                                MATCH (v:Vulnerability {id: $id, user_id: $uid,
+                                                        project_id: $pid})
+                                MERGE (i)-[:HAS_VULNERABILITY]->(v)
+                                RETURN count(i) AS matched
+                                """,
+                                addr=ip_addr, uid=user_id, pid=project_id, id=vuln_id,
+                            )
+                            if res_anchor.single()["matched"] > 0:
+                                stats["relationships_created"] += 1
+
+                    if is_child:
                         res_d = session.run(
                             """
                             MATCH (d:Domain {name: $domain, user_id: $uid, project_id: $pid})
@@ -216,19 +274,32 @@ class VhostSniMixin:
                         if res_d.single()["matched"] > 0:
                             stats["relationships_created"] += 2
 
+                    # No RESOLVES_TO: answering for a Host header says nothing
+                    # about what a resolver would return, and behind a shared
+                    # proxy it is routinely false.
+                    #
+                    # Releases before this wrote one anyway, so drop it for the
+                    # pair in hand. record_type means a DNS writer corroborated
+                    # the edge and it stays. A resolution only a property-less
+                    # writer ever recorded is indistinguishable from ours and is
+                    # removed here, then rewritten by the next DNS pass.
                     if ip_addr:
-                        res_ip = session.run(
+                        res_stale = session.run(
                             """
-                            MATCH (s:Subdomain {name: $hostname, user_id: $uid, project_id: $pid})
-                            MATCH (i:IP {address: $addr, user_id: $uid, project_id: $pid})
-                            MERGE (s)-[:RESOLVES_TO {discovered_via: 'vhost_sni_enum'}]->(i)
-                            RETURN count(i) AS matched
+                            MATCH (s:Subdomain {name: $hostname, user_id: $uid,
+                                                project_id: $pid})
+                                  -[r:RESOLVES_TO]->
+                                  (i:IP {address: $addr, user_id: $uid,
+                                         project_id: $pid})
+                            WHERE r.discovered_via = 'vhost_sni_enum'
+                              AND r.record_type IS NULL
+                            DELETE r
+                            RETURN count(r) AS removed
                             """,
                             hostname=hostname, addr=ip_addr,
                             uid=user_id, pid=project_id,
                         )
-                        if res_ip.single()["matched"] > 0:
-                            stats["relationships_created"] += 1
+                        stats["stale_dns_edges_removed"] += res_stale.single()["removed"]
 
                     # For host_header_bypass (L7 vs L4 disagreement) the IP is
                     # also a vulnerable surface — attach the same Vulnerability
@@ -266,6 +337,22 @@ class VhostSniMixin:
                     hostname = _extract_hostname(url)
                     if not hostname:
                         continue
+                    # Same rule as the findings above: an in-scope host owns its
+                    # URL even when this run saw no finding for it, so the URL
+                    # never lands in the graph with nobody pointing at it.
+                    if _is_child_of(hostname, target_domain):
+                        session.run(
+                            """
+                            MERGE (s:Subdomain {name: $host, user_id: $uid,
+                                                project_id: $pid})
+                            ON CREATE SET s.source = 'vhost_sni_enum',
+                                          s.has_dns_records = false,
+                                          s.created_at = datetime()
+                            SET s.updated_at = datetime()
+                            """,
+                            host=hostname, uid=user_id, pid=project_id,
+                        )
+
                     res = session.run(
                         """
                         MERGE (b:BaseURL {url: $url, user_id: $uid, project_id: $pid})
@@ -276,19 +363,41 @@ class VhostSniMixin:
                                       b.port = $port
                         SET b.updated_at = datetime()
                         WITH b
-                        MERGE (s:Subdomain {name: $host, user_id: $uid, project_id: $pid})
-                        ON CREATE SET s.source = 'vhost_sni_enum',
-                                      s.created_at = datetime()
-                        SET s.updated_at = datetime()
-                        MERGE (s)-[:HAS_BASE_URL]->(b)
-                        RETURN count(b) AS created
+                        OPTIONAL MATCH (s:Subdomain {
+                            name: $host, user_id: $uid, project_id: $pid
+                        })
+                        FOREACH (_ IN CASE WHEN s IS NOT NULL THEN [1] ELSE [] END |
+                            SET s.updated_at = datetime()
+                            MERGE (s)-[:HAS_BASE_URL]->(b)
+                        )
+                        RETURN count(b) AS created, count(s) AS linked
                         """,
                         url=url, uid=user_id, pid=project_id,
                         scheme=_scheme(url), host=hostname, port=_port(url),
                     )
-                    if res.single()["created"] > 0:
+                    rec = res.single()
+                    if rec["created"] > 0:
                         stats["baseurls_created"] += 1
+                    if rec["linked"] > 0:
                         stats["relationships_created"] += 1
+                    elif hostname in finding_ip_by_host:
+                        # No Subdomain owns this URL (an out-of-scope vhost), so
+                        # hang it off the service that served it rather than
+                        # leaving it unreachable. The port has to come from the
+                        # URL: a host found on several ports yields one BaseURL
+                        # each, and they do not share a Service.
+                        res_svc = session.run(
+                            """
+                            MATCH (svc:Service {ip_address: $addr, port_number: $port,
+                                                user_id: $uid, project_id: $pid})
+                            MATCH (b:BaseURL {url: $url, user_id: $uid, project_id: $pid})
+                            MERGE (svc)-[:SERVES_URL]->(b)
+                            RETURN count(svc) AS matched
+                            """,
+                            addr=finding_ip_by_host[hostname], port=_port(url), url=url,
+                            uid=user_id, pid=project_id,
+                        )
+                        stats["relationships_created"] += res_svc.single()["matched"]
                 except Exception as e:
                     stats["errors"].append(f"vhost_sni baseurl {url} failed: {e}")
 
@@ -298,7 +407,8 @@ class VhostSniMixin:
                 f"{stats['subdomains_enriched']} Subdomain enriched, "
                 f"{stats['ips_enriched']} IP enriched, "
                 f"{stats['baseurls_created']} BaseURL created, "
-                f"{stats['relationships_created']} relationship(s)"
+                f"{stats['relationships_created']} relationship(s), "
+                f"{stats['stale_dns_edges_removed']} stale DNS edge(s) removed"
             )
         if stats["errors"]:
             print(f"[!][graph-db] vhost_sni: {len(stats['errors'])} error(s) during graph update")
@@ -319,6 +429,14 @@ def _build_url(hostname: str, port, scheme: str) -> str:
     if (scheme == "https" and port_i == 443) or (scheme == "http" and port_i == 80) or port_i == 0:
         return f"{scheme}://{hostname}"
     return f"{scheme}://{hostname}:{port_i}"
+
+
+def _is_child_of(hostname: str, target_domain: str) -> bool:
+    """True only for a real child of the engagement's domain. A bare endswith
+    would also claim 'notexample.com' as part of 'example.com'."""
+    if not hostname or not target_domain:
+        return False
+    return hostname.endswith("." + target_domain)
 
 
 def _extract_hostname(url: str) -> str:

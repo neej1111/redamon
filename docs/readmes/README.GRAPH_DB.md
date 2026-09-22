@@ -19,6 +19,34 @@ Configured via root `.env` file:
 - `NEO4J_USER` - Username (default: `neo4j`)
 - `NEO4J_PASSWORD` - Your password
 
+## The schema
+
+This file covers running Neo4j. What the graph CONTAINS - every node label,
+its properties, and the relationships between them - is declared once, in
+[graph_db/schema_sections.md](../../graph_db/schema_sections.md).
+
+```bash
+# the whole schema, as the agent is served it
+python3 -c "from graph_db.schema_render import render_schema; print(render_schema())"
+
+# one label
+python3 -c "from graph_db.schema_render import render_label; print(render_label('Subdomain'))"
+```
+
+Constraints and indexes are generated from
+[graph_db/schema_keys.py](../../graph_db/schema_keys.py) and applied by
+`init_schema` on every container spawn, so a fresh database needs no manual DDL.
+
+After editing the schema, re-seed the catalog:
+
+```bash
+python3 tooling/scripts/seed_schema_catalog.py
+```
+
+[GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) explains WHY the graph is shaped this way -
+the tenancy model, the `Muted` label, Scan Timeline. It deliberately lists no
+labels.
+
 ## Configuration
 
 The graph is automatically populated after each recon scan phase completes. Graph updates are controlled by the `UPDATE_GRAPH_DB` setting in the project configuration. GitHub Secret Hunt results are also ingested into the graph after scan completion.

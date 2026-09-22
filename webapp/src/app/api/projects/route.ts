@@ -249,7 +249,13 @@ export async function POST(request: NextRequest) {
 
     // Strip unknown keys + coerce types (LLM may return strings for Int/Boolean fields)
     const VALID_FIELDS = new Set(Object.values(Prisma.ProjectScalarFieldEnum))
-    const NON_SETTABLE = new Set(['id', 'userId', 'name', 'targetDomain', 'ipMode', 'createdAt', 'updatedAt'])
+    // `roeEnabled` joins these because it is DERIVED from whether any engagement
+    // limit is set, and nothing writes it. Creating a project with it set would
+    // store a value that disagrees with the derivation from the first moment.
+    const NON_SETTABLE = new Set([
+      'id', 'userId', 'name', 'targetDomain', 'ipMode', 'createdAt', 'updatedAt',
+      'roeEnabled',
+    ])
 
     // Build type map from Prisma DMMF for type coercion
     const projectModel = Prisma.dmmf.datamodel.models.find((m: { name: string }) => m.name === 'Project')

@@ -1065,17 +1065,49 @@ def parse_httpx_output(output_file: str, root_domain: str = None, allowed_hosts:
             }
 
             # TLS information
+            #
+            # httpx runs the tlsx library for -tls-grab, so this object already
+            # carries the SHA-256 fingerprint and the same expired/self_signed/
+            # mismatched/wildcard verdicts tlsx reports. Keeping only the
+            # descriptive fields left self-signed permanently UNKNOWN on the five
+            # HTTPS ports and forced a surrogate cert_key for a certificate whose
+            # true fingerprint was sitting in the same payload -- so the cert on
+            # :443 never converged with the same cert tlsx saw on :993.
             tls_data = entry.get("tls") or entry.get("tls-grab") or {}
             if tls_data or entry.get("tls_version"):
+                fp = tls_data.get("fingerprint_hash")
+                fp = fp if isinstance(fp, dict) else {}
+                issuer_dn = tls_data.get("issuer_dn")
+                issuer_cn = tls_data.get("issuer_cn")
                 url_entry["tls"] = {
-                    "version": tls_data.get("version") or entry.get("tls_version"),
+                    # httpx names it `tls_version` INSIDE the tls object; the
+                    # top-level key it was read from does not exist, so version
+                    # was None on every probe and tls_weak_version never fired.
+                    "version": (tls_data.get("version") or tls_data.get("tls_version")
+                                or entry.get("tls_version")),
                     "cipher": tls_data.get("cipher"),
                     "certificate": {
                         "subject_cn": tls_data.get("subject_cn") or entry.get("subject_cn"),
-                        "issuer": tls_data.get("issuer_org") or entry.get("issuer_org"),
+                        "subject_dn": tls_data.get("subject_dn"),
+                        "subject_org": tls_data.get("subject_org"),
+                        # Must mirror the tlsx writer's precedence (issuer_dn or
+                        # issuer_cn): both sources now land on ONE Certificate
+                        # node, and a different `issuer` would flip the property
+                        # depending on which scanner wrote last.
+                        "issuer": (issuer_dn or issuer_cn
+                                   or tls_data.get("issuer_org") or entry.get("issuer_org")),
+                        "issuer_dn": issuer_dn,
+                        "issuer_cn": issuer_cn,
+                        "issuer_org": tls_data.get("issuer_org"),
+                        "serial": tls_data.get("serial"),
                         "not_before": tls_data.get("not_before"),
                         "not_after": tls_data.get("not_after"),
                         "san": tls_data.get("subject_an") or entry.get("subject_an") or [],
+                        "fingerprint_sha256": fp.get("sha256"),
+                        "expired": tls_data.get("expired"),
+                        "self_signed": tls_data.get("self_signed"),
+                        "mismatched": tls_data.get("mismatched"),
+                        "wildcard": tls_data.get("wildcard_certificate"),
                     }
                 }
 

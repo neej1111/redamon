@@ -1,10 +1,11 @@
 'use client'
 
 import { useState, useRef } from 'react'
-import { ChevronDown, Shield, Upload, Loader2, Plus, Minus, CheckCircle } from 'lucide-react'
-import { Toggle, WikiInfoButton } from '@/components/ui'
+import { ChevronDown, Shield, Upload, Loader2, AlertTriangle, CheckCircle } from 'lucide-react'
+import { WikiInfoButton } from '@/components/ui'
 import { Modal } from '@/components/ui/Modal/Modal'
 import type { Project } from '@prisma/client'
+import { currentValuesForDiff, type ParseProposal } from '@/lib/reconSettings/roeParse'
 import styles from '../ProjectForm.module.css'
 
 type ProjectFormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
@@ -28,13 +29,6 @@ const ENGAGEMENT_TYPES = [
   { value: 'red_team', label: 'Red Team Engagement' },
 ]
 
-const FORBIDDEN_CATEGORIES = [
-  { value: 'brute_force', label: 'Credential Testing' },
-  { value: 'dos', label: 'Availability Testing' },
-  { value: 'social_engineering', label: 'Social Engineering' },
-  { value: 'physical', label: 'Physical Access' },
-]
-
 const DATA_HANDLING_OPTIONS = [
   { value: 'no_access', label: 'No access to sensitive data' },
   { value: 'prove_access_only', label: 'Prove access only (no collection)' },
@@ -44,13 +38,34 @@ const DATA_HANDLING_OPTIONS = [
 
 const COMPLIANCE_OPTIONS = ['PCI-DSS', 'HIPAA', 'SOC2', 'GDPR', 'ISO27001']
 
-const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+/** One proposed value, short enough to read in a diff row. */
+function preview(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (Array.isArray(value)) return value.length === 0 ? '(empty)' : value.join(', ').slice(0, 160)
+  if (typeof value === 'object') return JSON.stringify(value).slice(0, 160)
+  const text = String(value)
+  return text === '' ? '(empty)' : text.slice(0, 160)
+}
 
+/**
+ * The engagement RECORD: who the client is, who to call, what the document said.
+ *
+ * Not the engagement's LIMITS. Those used to live here too, under the same `roe`
+ * prefix and the same heading, and conflating them is what made a master switch
+ * that disabled the rate ceiling look like an ordinary checkbox. The limits are
+ * ordinary settings now: the rate ceiling, the excluded hosts and the scanning
+ * window sit in Target & Modules, and the agent's denylists sit with the agent's
+ * other behaviour.
+ *
+ * What is left here is the contract. A person writes it, a model reads it, and
+ * nothing in the pipeline enforces it - which is exactly why the MCP surface
+ * never touches it and why it carries third-party personal data.
+ */
 export function RoeSection({ data, updateField, updateMultipleFields, mode, onFileSelected }: RoeSectionProps) {
   const [isOpen, setIsOpen] = useState(true)
   const [isParsing, setIsParsing] = useState(false)
   const [parseError, setParseError] = useState<string | null>(null)
-  const [showParseSuccess, setShowParseSuccess] = useState(false)
+  const [proposal, setProposal] = useState<(ParseProposal & { roeRawText?: string }) | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const readOnly = mode === 'edit'
@@ -67,6 +82,12 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
       if (data.agentOpenaiModel) {
         formData.append('model', data.agentOpenaiModel as string)
       }
+      // The present values, so what comes back is a DIFF rather than a list of
+      // assignments: a parsed value equal to what is already set is not a
+      // change. Narrowed to the fields a document could propose - the form's
+      // data also holds stored credentials, and a value that does not need to
+      // travel should not travel.
+      formData.append('current', JSON.stringify(currentValuesForDiff(data as never)))
 
       const response = await fetch('/api/roe/parse', {
         method: 'POST',
@@ -78,90 +99,12 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
         throw new Error(err.error || `Parse failed (${response.status})`)
       }
 
-      const parsed = await response.json()
-
-      // Build update object from parsed fields, only setting non-null values
-      const updates: Partial<ProjectFormData> = {}
-      const fieldMap: Record<string, keyof ProjectFormData> = {
-        name: 'name',
-        description: 'description',
-        targetDomain: 'targetDomain',
-        targetIps: 'targetIps',
-        ipMode: 'ipMode',
-        subdomainList: 'subdomainList',
-        stealthMode: 'stealthMode',
-        roeEnabled: 'roeEnabled',
-        roeRawText: 'roeRawText',
-        roeClientName: 'roeClientName',
-        roeClientContactName: 'roeClientContactName',
-        roeClientContactEmail: 'roeClientContactEmail',
-        roeClientContactPhone: 'roeClientContactPhone',
-        roeEmergencyContact: 'roeEmergencyContact',
-        roeEngagementStartDate: 'roeEngagementStartDate',
-        roeEngagementEndDate: 'roeEngagementEndDate',
-        roeEngagementType: 'roeEngagementType',
-        roeExcludedHosts: 'roeExcludedHosts',
-        roeExcludedHostReasons: 'roeExcludedHostReasons',
-        roeTimeWindowEnabled: 'roeTimeWindowEnabled',
-        roeTimeWindowTimezone: 'roeTimeWindowTimezone',
-        roeTimeWindowDays: 'roeTimeWindowDays',
-        roeTimeWindowStartTime: 'roeTimeWindowStartTime',
-        roeTimeWindowEndTime: 'roeTimeWindowEndTime',
-        roeForbiddenCategories: 'roeForbiddenCategories',
-        agentToolPhaseMap: 'agentToolPhaseMap',
-        roeMaxSeverityPhase: 'roeMaxSeverityPhase',
-        roeAllowDos: 'roeAllowDos',
-        roeAllowSocialEngineering: 'roeAllowSocialEngineering',
-        roeAllowPhysicalAccess: 'roeAllowPhysicalAccess',
-        roeAllowDataExfiltration: 'roeAllowDataExfiltration',
-        roeAllowAccountLockout: 'roeAllowAccountLockout',
-        roeAllowProductionTesting: 'roeAllowProductionTesting',
-        roeGlobalMaxRps: 'roeGlobalMaxRps',
-        roeSensitiveDataHandling: 'roeSensitiveDataHandling',
-        roeDataRetentionDays: 'roeDataRetentionDays',
-        roeRequireDataEncryption: 'roeRequireDataEncryption',
-        roeStatusUpdateFrequency: 'roeStatusUpdateFrequency',
-        roeCriticalFindingNotify: 'roeCriticalFindingNotify',
-        roeIncidentProcedure: 'roeIncidentProcedure',
-        roeThirdPartyProviders: 'roeThirdPartyProviders',
-        roeComplianceFrameworks: 'roeComplianceFrameworks',
-        roeNotes: 'roeNotes',
-        naabuRateLimit: 'naabuRateLimit',
-        nucleiRateLimit: 'nucleiRateLimit',
-        katanaRateLimit: 'katanaRateLimit',
-        httpxRateLimit: 'httpxRateLimit',
-        nucleiSeverity: 'nucleiSeverity',
-        scanModules: 'scanModules',
-      }
-
-      for (const [key, formKey] of Object.entries(fieldMap)) {
-        if (parsed[key] !== null && parsed[key] !== undefined) {
-          // agentToolPhaseMap: LLM returns only disabled tools (e.g. {"execute_hydra": []}).
-          // Merge into existing map so we don't wipe out all other tools' phases.
-          if (key === 'agentToolPhaseMap' && typeof parsed[key] === 'object') {
-            const currentMap = (typeof data.agentToolPhaseMap === 'string'
-              ? JSON.parse(data.agentToolPhaseMap)
-              : data.agentToolPhaseMap ?? {}) as Record<string, string[]>
-            const disabledTools = parsed[key] as Record<string, string[]>
-            const merged = { ...currentMap }
-            for (const [tool, phases] of Object.entries(disabledTools)) {
-              merged[tool] = phases // override only the tools the LLM wants to disable
-            }
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (updates as any)[formKey] = merged
-            continue
-          }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (updates as any)[formKey] = parsed[key]
-        }
-      }
-
-      // Store parsed JSON for viewer
-      updates.roeParsedJson = parsed
-      updates.roeEnabled = true
-
-      updateMultipleFields(updates)
-      setShowParseSuccess(true)
+      // A PROPOSAL, not a write. There is no field map here and there must never
+      // be one again: the route writes whatever the registry marks writable and
+      // validates every value through the same bounds an MCP write goes through,
+      // so field names live in exactly one place. This component copies what it
+      // is handed and shows it to a person first.
+      setProposal(await response.json())
     } catch (err) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse document')
     } finally {
@@ -169,48 +112,22 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
     }
   }
 
-  const addExcludedHost = () => {
-    updateField('roeExcludedHosts', [...(data.roeExcludedHosts || []), ''])
-    updateField('roeExcludedHostReasons', [...(data.roeExcludedHostReasons || []), ''])
-  }
-
-  const removeExcludedHost = (index: number) => {
-    const hosts = [...(data.roeExcludedHosts || [])]
-    const reasons = [...(data.roeExcludedHostReasons || [])]
-    hosts.splice(index, 1)
-    reasons.splice(index, 1)
-    updateField('roeExcludedHosts', hosts)
-    updateField('roeExcludedHostReasons', reasons)
-  }
-
-  const updateExcludedHost = (index: number, value: string) => {
-    const hosts = [...(data.roeExcludedHosts || [])]
-    hosts[index] = value
-    updateField('roeExcludedHosts', hosts)
-  }
-
-  const updateExcludedReason = (index: number, value: string) => {
-    const reasons = [...(data.roeExcludedHostReasons || [])]
-    reasons[index] = value
-    updateField('roeExcludedHostReasons', reasons)
-  }
-
-  const toggleDay = (day: string) => {
-    const days = data.roeTimeWindowDays || []
-    if (days.includes(day)) {
-      updateField('roeTimeWindowDays', days.filter(d => d !== day))
-    } else {
-      updateField('roeTimeWindowDays', [...days, day])
+  const applyProposal = () => {
+    if (!proposal) return
+    const updates: Record<string, unknown> = {}
+    for (const change of proposal.changes) updates[change.key] = change.after
+    if (proposal.roeRawText) updates.roeRawText = proposal.roeRawText
+    // What the document actually produced, kept on the record so the report can
+    // say which settings came from it rather than from a person. Stored as the
+    // CONFIRMED set, not the raw model output: a value somebody declined is not
+    // something the document configured.
+    updates.roeParsedJson = {
+      applied: Object.fromEntries(proposal.changes.map(c => [c.key, c.after])),
+      rejected: proposal.rejected,
+      ignored: proposal.ignored,
     }
-  }
-
-  const toggleForbiddenCategory = (cat: string) => {
-    const cats = data.roeForbiddenCategories || []
-    if (cats.includes(cat)) {
-      updateField('roeForbiddenCategories', cats.filter(c => c !== cat))
-    } else {
-      updateField('roeForbiddenCategories', [...cats, cat])
-    }
+    updateMultipleFields(updates as Partial<ProjectFormData>)
+    setProposal(null)
   }
 
   const toggleCompliance = (fw: string) => {
@@ -228,7 +145,7 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
       <div className={styles.sectionHeader} onClick={() => setIsOpen(!isOpen)}>
         <h2 className={styles.sectionTitle}>
           <Shield size={16} />
-          Rules of Engagement
+          Engagement Record
           <WikiInfoButton target="Roe" />
         </h2>
         <ChevronDown
@@ -244,8 +161,10 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
             <div className={styles.subSection}>
               <h3 className={styles.subSectionTitle}>Upload RoE Document</h3>
               <p className={styles.sectionDescription}>
-                Upload a Rules of Engagement document (.pdf, .txt, .md, .docx) to auto-populate project settings.
-                The parsed rules will enforce guardrails on both the <strong>recon pipeline</strong> (excluded hosts, rate limits, time windows) and <strong>agentic AI activities</strong> (tool restrictions, severity phase cap, prompt-level instructions).
+                Upload a Rules of Engagement document (.pdf, .txt, .md, .docx). It is read and
+                turned into a <strong>proposed</strong> set of changes across the whole form:
+                this record, the engagement&apos;s limits in Target &amp; Modules, and any tool
+                the document constrains. Nothing is applied until you review the diff.
               </p>
               <div className={styles.fieldRow}>
                 <div className={styles.fieldGroup}>
@@ -274,7 +193,7 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
                     ) : (
                       <>
                         <Upload size={14} />
-                        Upload & Parse Document
+                        Upload &amp; Parse Document
                       </>
                     )}
                   </button>
@@ -288,402 +207,362 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
             </div>
           )}
 
-          {/* Master Switch */}
+          {/* Engagement kind: who the target belongs to, and therefore what has
+              to be true before a scan may start. Create-time only, for the same
+              reason the target is: converting a project afterwards would either
+              claim an authority nobody granted or drop a ceiling a person set. */}
           <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Engagement</h3>
             <div className={styles.fieldRow}>
               <div className={styles.fieldGroup}>
-                <label className={styles.fieldLabel}>Enable Rules of Engagement</label>
-                <Toggle
-                  checked={data.roeEnabled}
-                  onChange={(v) => updateField('roeEnabled', v)}
+                <label className={styles.fieldLabel}>Whose estate is the target?</label>
+                <select
+                  className="select"
+                  value={(data.engagementKind as string) || 'internal'}
                   disabled={readOnly}
+                  onChange={(e) => updateField('engagementKind', e.target.value)}
+                >
+                  <option value="internal">Internal - our own estate</option>
+                  <option value="third_party">Third party - somebody else&apos;s</option>
+                </select>
+                <span className={styles.fieldHint}>
+                  Fixed at creation. A third-party engagement cannot start without a non-zero
+                  request-rate ceiling AND a record of what authorized it.
+                </span>
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Identity Header</label>
+                <input
+                  className="textInput"
+                  value={(data.engagementIdentityHeader as string) || ''}
+                  placeholder="X-Bug-Bounty: your-handle"
+                  onChange={(e) => updateField('engagementIdentityHeader', e.target.value)}
                 />
-                <span className={styles.fieldHint}>When enabled, RoE constraints are enforced on both the agent and recon pipeline.</span>
+                <span className={styles.fieldHint}>
+                  Sent with every request so the target&apos;s operators can attribute the traffic
+                  to you. Many programs require one. Leave empty to send none.
+                </span>
+              </div>
+            </div>
+            {data.engagementKind === 'third_party' && !(data.roeGlobalMaxRps > 0) && (
+              <span className={styles.fieldHint} style={{ color: 'var(--color-danger, #d33)' }}>
+                A third-party engagement needs a request-rate ceiling, or its scans will be
+                refused. Set it in Target &amp; Modules &rarr; Engagement limits.
+              </span>
+            )}
+            <span className={styles.fieldHint}>
+              This record is the CONTRACT: who the client is, who to call, what the document said.
+              Nothing here constrains a scan. The limits that do - the rate ceiling, the excluded
+              hosts, the scanning window and the agent&apos;s denylists - are ordinary settings,
+              editable at any time, in Target &amp; Modules and Agent Behaviour.
+            </span>
+          </div>
+
+          {/* Client & Engagement */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Client &amp; Engagement</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Client Name</label>
+                <input className="textInput" value={data.roeClientName} readOnly={readOnly}
+                  onChange={(e) => updateField('roeClientName', e.target.value)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Engagement Type</label>
+                <select className="select" value={data.roeEngagementType} disabled={readOnly}
+                  onChange={(e) => updateField('roeEngagementType', e.target.value)}>
+                  {ENGAGEMENT_TYPES.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Contact Name</label>
+                <input className="textInput" value={data.roeClientContactName} readOnly={readOnly}
+                  onChange={(e) => updateField('roeClientContactName', e.target.value)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Contact Email</label>
+                <input className="textInput" type="email" value={data.roeClientContactEmail} readOnly={readOnly}
+                  onChange={(e) => updateField('roeClientContactEmail', e.target.value)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Contact Phone</label>
+                <input className="textInput" value={data.roeClientContactPhone} readOnly={readOnly}
+                  onChange={(e) => updateField('roeClientContactPhone', e.target.value)} />
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Emergency Contact</label>
+                <input className="textInput" value={data.roeEmergencyContact} readOnly={readOnly}
+                  onChange={(e) => updateField('roeEmergencyContact', e.target.value)} />
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Start Date</label>
+                <input className="textInput" type="date" value={data.roeEngagementStartDate} readOnly={readOnly}
+                  onChange={(e) => updateField('roeEngagementStartDate', e.target.value)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>End Date</label>
+                <input className="textInput" type="date" value={data.roeEngagementEndDate} readOnly={readOnly}
+                  onChange={(e) => updateField('roeEngagementEndDate', e.target.value)} />
               </div>
             </div>
           </div>
 
-          {data.roeEnabled && (
-            <>
-              {/* Client & Engagement */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Client & Engagement</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Client Name</label>
-                    <input className="textInput" value={data.roeClientName} readOnly={readOnly}
-                      onChange={(e) => updateField('roeClientName', e.target.value)} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Engagement Type</label>
-                    <select className="select" value={data.roeEngagementType} disabled={readOnly}
-                      onChange={(e) => updateField('roeEngagementType', e.target.value)}>
-                      {ENGAGEMENT_TYPES.map(t => (
-                        <option key={t.value} value={t.value}>{t.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Contact Name</label>
-                    <input className="textInput" value={data.roeClientContactName} readOnly={readOnly}
-                      onChange={(e) => updateField('roeClientContactName', e.target.value)} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Contact Email</label>
-                    <input className="textInput" type="email" value={data.roeClientContactEmail} readOnly={readOnly}
-                      onChange={(e) => updateField('roeClientContactEmail', e.target.value)} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Contact Phone</label>
-                    <input className="textInput" value={data.roeClientContactPhone} readOnly={readOnly}
-                      onChange={(e) => updateField('roeClientContactPhone', e.target.value)} />
-                  </div>
-                </div>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Emergency Contact</label>
-                    <input className="textInput" value={data.roeEmergencyContact} readOnly={readOnly}
-                      onChange={(e) => updateField('roeEmergencyContact', e.target.value)} />
-                  </div>
-                </div>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Start Date</label>
-                    <input className="textInput" type="date" value={data.roeEngagementStartDate} readOnly={readOnly}
-                      onChange={(e) => updateField('roeEngagementStartDate', e.target.value)} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>End Date</label>
-                    <input className="textInput" type="date" value={data.roeEngagementEndDate} readOnly={readOnly}
-                      onChange={(e) => updateField('roeEngagementEndDate', e.target.value)} />
-                  </div>
+          {/* Recorded permissions. These three are RECORD rather than limit: the
+              pipeline has no physical capability, production is a statement about
+              the estate that no scanner can verify, and exfiltration reaches the
+              agent as prompt text. The three that ARE enforced in code live with
+              the agent's other behaviour. */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Recorded Permissions</h3>
+            <p className={styles.sectionDescription}>
+              Read by the agent as prompt context and printed in the report. The permissions
+              enforced in code - availability testing, social engineering, account lockout,
+              forbidden tools and categories, the severity cap - are in Agent Behaviour.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Allow Physical Access</label>
+                <input type="checkbox" checked={data.roeAllowPhysicalAccess} disabled={readOnly}
+                  onChange={(e) => updateField('roeAllowPhysicalAccess', e.target.checked)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Allow Data Exfiltration</label>
+                <input type="checkbox" checked={data.roeAllowDataExfiltration} disabled={readOnly}
+                  onChange={(e) => updateField('roeAllowDataExfiltration', e.target.checked)} />
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Allow Production Testing</label>
+                <input type="checkbox" checked={data.roeAllowProductionTesting} disabled={readOnly}
+                  onChange={(e) => updateField('roeAllowProductionTesting', e.target.checked)} />
+              </div>
+            </div>
+          </div>
+
+          {/* Data Handling */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Data Handling</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Sensitive Data Policy</label>
+                <select className="select" value={data.roeSensitiveDataHandling} disabled={readOnly}
+                  onChange={(e) => updateField('roeSensitiveDataHandling', e.target.value)}>
+                  {DATA_HANDLING_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Data Retention (days)</label>
+                <input className="textInput" type="number" min={0} max={3650}
+                  value={data.roeDataRetentionDays} readOnly={readOnly}
+                  onChange={(e) => updateField('roeDataRetentionDays', parseInt(e.target.value) || 90)} />
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Require data encryption</label>
+                <input type="checkbox" checked={data.roeRequireDataEncryption} disabled={readOnly}
+                  onChange={(e) => updateField('roeRequireDataEncryption', e.target.checked)} />
+              </div>
+            </div>
+          </div>
+
+          {/* Communication */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Communication</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Status Update Frequency</label>
+                <select className="select" value={data.roeStatusUpdateFrequency} disabled={readOnly}
+                  onChange={(e) => updateField('roeStatusUpdateFrequency', e.target.value)}>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="on_finding">On each finding</option>
+                  <option value="none">None</option>
+                </select>
+              </div>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Notify client on critical findings</label>
+                <input type="checkbox" checked={data.roeCriticalFindingNotify} disabled={readOnly}
+                  onChange={(e) => updateField('roeCriticalFindingNotify', e.target.checked)} />
+              </div>
+            </div>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Incident Procedure</label>
+                <textarea className="textInput" rows={3} value={data.roeIncidentProcedure} readOnly={readOnly}
+                  onChange={(e) => updateField('roeIncidentProcedure', e.target.value)}
+                  placeholder="What to do if testing causes an incident..." />
+              </div>
+            </div>
+          </div>
+
+          {/* Compliance */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Compliance &amp; Authorization</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Compliance Frameworks</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {COMPLIANCE_OPTIONS.map(fw => (
+                    <label key={fw} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: readOnly ? 'default' : 'pointer' }}>
+                      <input type="checkbox" checked={(data.roeComplianceFrameworks || []).includes(fw)}
+                        disabled={readOnly} onChange={() => toggleCompliance(fw)} />
+                      {fw}
+                    </label>
+                  ))}
                 </div>
               </div>
+            </div>
+          </div>
 
-              {/* Excluded Hosts */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Excluded Hosts</h3>
-                <p className={styles.sectionDescription}>IPs or domains that must NEVER be scanned or tested.</p>
-                {(data.roeExcludedHosts || []).map((host, i) => (
-                  <div key={i} className={styles.fieldRow} style={{ alignItems: 'flex-end' }}>
-                    <div className={styles.fieldGroup} style={{ flex: 1 }}>
-                      <label className={styles.fieldLabel}>Host</label>
-                      <input className="textInput" value={host} readOnly={readOnly}
-                        onChange={(e) => updateExcludedHost(i, e.target.value)} placeholder="IP or domain" />
-                    </div>
-                    <div className={styles.fieldGroup} style={{ flex: 1 }}>
-                      <label className={styles.fieldLabel}>Reason</label>
-                      <input className="textInput" value={(data.roeExcludedHostReasons || [])[i] || ''} readOnly={readOnly}
-                        onChange={(e) => updateExcludedReason(i, e.target.value)} placeholder="Why excluded" />
-                    </div>
-                    {!readOnly && (
-                      <button type="button" className="secondaryButton" onClick={() => removeExcludedHost(i)}
-                        style={{ marginBottom: 4 }}>
-                        <Minus size={14} />
-                      </button>
-                    )}
-                  </div>
-                ))}
-                {!readOnly && (
-                  <button type="button" className="secondaryButton" onClick={addExcludedHost}
-                    style={{ width: 'fit-content', marginTop: 4 }}>
-                    <Plus size={14} /> Add Excluded Host
-                  </button>
-                )}
+          {/* Third-Party Providers */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Third-Party Providers</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel}>Cloud/hosting providers with separate authorization</label>
+                <input className="textInput" type="text" readOnly={readOnly}
+                  value={(data.roeThirdPartyProviders || []).join(', ')}
+                  onChange={(e) => updateField('roeThirdPartyProviders', e.target.value.split(',').map((s: string) => s.trim()).filter(Boolean))}
+                  placeholder="e.g. AWS, Hetzner, Cloudflare" />
               </div>
+            </div>
+          </div>
 
-              {/* Time Window */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Time Window</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Restrict testing to specific time window</label>
-                    <Toggle
-                      checked={data.roeTimeWindowEnabled}
-                      onChange={(v) => updateField('roeTimeWindowEnabled', v)}
-                      disabled={readOnly}
-                    />
-                  </div>
-                </div>
-                {data.roeTimeWindowEnabled && (
-                  <>
-                    <div className={styles.fieldRow}>
-                      <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>Timezone</label>
-                        <input className="textInput" value={data.roeTimeWindowTimezone} readOnly={readOnly}
-                          onChange={(e) => updateField('roeTimeWindowTimezone', e.target.value)}
-                          placeholder="e.g. Europe/Rome, America/New_York" />
-                      </div>
-                      <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>Start Time</label>
-                        <input className="textInput" type="time" value={data.roeTimeWindowStartTime} readOnly={readOnly}
-                          onChange={(e) => updateField('roeTimeWindowStartTime', e.target.value)} />
-                      </div>
-                      <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>End Time</label>
-                        <input className="textInput" type="time" value={data.roeTimeWindowEndTime} readOnly={readOnly}
-                          onChange={(e) => updateField('roeTimeWindowEndTime', e.target.value)} />
-                      </div>
-                    </div>
-                    <div className={styles.fieldRow}>
-                      <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>Allowed Days</label>
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {WEEKDAYS.map(day => (
-                            <label key={day} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: readOnly ? 'default' : 'pointer' }}>
-                              <input type="checkbox" checked={(data.roeTimeWindowDays || []).includes(day)}
-                                disabled={readOnly} onChange={() => toggleDay(day)} />
-                              {day.charAt(0).toUpperCase() + day.slice(1, 3)}
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
+          {/* Notes */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Notes</h3>
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <textarea className="textInput" rows={4} value={data.roeNotes} readOnly={readOnly}
+                  onChange={(e) => updateField('roeNotes', e.target.value)}
+                  placeholder="Additional rules not captured by fields above..." />
               </div>
+            </div>
+          </div>
 
-              {/* Testing Permissions */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Testing Permissions</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Availability Testing</label>
-                    <Toggle checked={data.roeAllowDos} onChange={(v) => updateField('roeAllowDos', v)} disabled={readOnly} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Social Engineering</label>
-                    <Toggle checked={data.roeAllowSocialEngineering} onChange={(v) => updateField('roeAllowSocialEngineering', v)} disabled={readOnly} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Physical Access</label>
-                    <Toggle checked={data.roeAllowPhysicalAccess} onChange={(v) => updateField('roeAllowPhysicalAccess', v)} disabled={readOnly} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Data Exfiltration</label>
-                    <Toggle checked={data.roeAllowDataExfiltration} onChange={(v) => updateField('roeAllowDataExfiltration', v)} disabled={readOnly} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Account Lockout</label>
-                    <Toggle checked={data.roeAllowAccountLockout} onChange={(v) => updateField('roeAllowAccountLockout', v)} disabled={readOnly} />
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Allow Production Testing</label>
-                    <Toggle checked={data.roeAllowProductionTesting} onChange={(v) => updateField('roeAllowProductionTesting', v)} disabled={readOnly} />
-                  </div>
+          {/* Raw RoE Text (always read-only) */}
+          {data.roeRawText && (
+            <div className={styles.subSection}>
+              <h3 className={styles.subSectionTitle}>Extracted Document Text</h3>
+              <div className={styles.fieldRow}>
+                <div className={styles.fieldGroup}>
+                  <textarea className="textInput" rows={8} value={data.roeRawText} readOnly
+                    style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} />
                 </div>
               </div>
-
-              {/* Forbidden Categories */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Forbidden Techniques</h3>
-                <p style={{ fontSize: '0.8rem', color: '#888', margin: '0 0 8px 0' }}>
-                  Tool-level restrictions are applied via Tool Phase Restrictions in the Tool Matrix tab.
-                </p>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Forbidden Categories</label>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      {FORBIDDEN_CATEGORIES.map(cat => (
-                        <label key={cat.value} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: readOnly ? 'default' : 'pointer' }}>
-                          <input type="checkbox" checked={(data.roeForbiddenCategories || []).includes(cat.value)}
-                            disabled={readOnly} onChange={() => toggleForbiddenCategory(cat.value)} />
-                          {cat.label}
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Severity Cap & Rate Limit */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Constraints</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Max Allowed Phase</label>
-                    <select className="select" value={data.roeMaxSeverityPhase} disabled={readOnly}
-                      onChange={(e) => updateField('roeMaxSeverityPhase', e.target.value)}>
-                      <option value="informational">Informational only (recon/scanning)</option>
-                      <option value="exploitation">Up to exploitation</option>
-                      <option value="post_exploitation">All phases (no restriction)</option>
-                    </select>
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Global Max Requests/sec</label>
-                    <input className="textInput" type="number" min={0} value={data.roeGlobalMaxRps} readOnly={readOnly}
-                      onChange={(e) => updateField('roeGlobalMaxRps', parseInt(e.target.value) || 0)} />
-                    <span className={styles.fieldHint}>0 = no cap. Caps all tool rate limits.</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Data Handling */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Data Handling</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Sensitive Data Policy</label>
-                    <select className="select" value={data.roeSensitiveDataHandling} disabled={readOnly}
-                      onChange={(e) => updateField('roeSensitiveDataHandling', e.target.value)}>
-                      {DATA_HANDLING_OPTIONS.map(opt => (
-                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Data Retention (days)</label>
-                    <input className="textInput" type="number" min={1} value={data.roeDataRetentionDays} readOnly={readOnly}
-                      onChange={(e) => updateField('roeDataRetentionDays', parseInt(e.target.value) || 90)} />
-                  </div>
-                </div>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Require data encryption</label>
-                    <Toggle checked={data.roeRequireDataEncryption}
-                      onChange={(v) => updateField('roeRequireDataEncryption', v)} disabled={readOnly} />
-                  </div>
-                </div>
-              </div>
-
-              {/* Communication */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Communication</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Status Update Frequency</label>
-                    <select className="select" value={data.roeStatusUpdateFrequency} disabled={readOnly}
-                      onChange={(e) => updateField('roeStatusUpdateFrequency', e.target.value)}>
-                      <option value="daily">Daily</option>
-                      <option value="weekly">Weekly</option>
-                      <option value="on_finding">On each finding</option>
-                      <option value="none">None</option>
-                    </select>
-                  </div>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Notify client on critical findings</label>
-                    <Toggle checked={data.roeCriticalFindingNotify}
-                      onChange={(v) => updateField('roeCriticalFindingNotify', v)} disabled={readOnly} />
-                  </div>
-                </div>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Incident Procedure</label>
-                    <textarea className="textInput" rows={3} value={data.roeIncidentProcedure} readOnly={readOnly}
-                      onChange={(e) => updateField('roeIncidentProcedure', e.target.value)}
-                      placeholder="What to do if testing causes an incident..." />
-                  </div>
-                </div>
-              </div>
-
-              {/* Compliance */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Compliance & Authorization</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Compliance Frameworks</label>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      {COMPLIANCE_OPTIONS.map(fw => (
-                        <label key={fw} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: readOnly ? 'default' : 'pointer' }}>
-                          <input type="checkbox" checked={(data.roeComplianceFrameworks || []).includes(fw)}
-                            disabled={readOnly} onChange={() => toggleCompliance(fw)} />
-                          {fw}
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Third-Party Providers */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Third-Party Providers</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <label className={styles.fieldLabel}>Cloud/hosting providers with separate authorization</label>
-                    <input className="textInput" type="text" readOnly={readOnly}
-                      value={(data.roeThirdPartyProviders || []).join(', ')}
-                      onChange={(e) => updateField('roeThirdPartyProviders', e.target.value.split(',').map((s: string) => s.trim()).filter(Boolean))}
-                      placeholder="e.g. AWS, Hetzner, Cloudflare" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Notes */}
-              <div className={styles.subSection}>
-                <h3 className={styles.subSectionTitle}>Notes</h3>
-                <div className={styles.fieldRow}>
-                  <div className={styles.fieldGroup}>
-                    <textarea className="textInput" rows={4} value={data.roeNotes} readOnly={readOnly}
-                      onChange={(e) => updateField('roeNotes', e.target.value)}
-                      placeholder="Additional rules not captured by fields above..." />
-                  </div>
-                </div>
-              </div>
-
-              {/* Raw RoE Text (always read-only) */}
-              {data.roeRawText && (
-                <div className={styles.subSection}>
-                  <h3 className={styles.subSectionTitle}>Extracted Document Text</h3>
-                  <div className={styles.fieldRow}>
-                    <div className={styles.fieldGroup}>
-                      <textarea className="textInput" rows={8} value={data.roeRawText} readOnly
-                        style={{ fontFamily: 'monospace', fontSize: '0.8rem' }} />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
+            </div>
           )}
         </div>
       )}
     </div>
 
+    {/* The parse result is a PROPOSAL. A document is a third party's text and an
+        LLM reading it is not a sanitiser, so what it produces is a diff a person
+        confirms rather than a write. Values the validators refused are shown
+        here rather than dropped: silently discarding one is how somebody
+        believes a document applied when part of it did not. */}
     <Modal
-      isOpen={showParseSuccess}
-      onClose={() => setShowParseSuccess(false)}
-      title="RoE Document Parsed Successfully"
-      size="default"
+      isOpen={proposal !== null}
+      onClose={() => setProposal(null)}
+      title="Review what this document would change"
+      size="large"
       footer={
-        <button
-          type="button"
-          onClick={() => setShowParseSuccess(false)}
-          style={{
-            padding: '8px 24px',
-            background: 'var(--color-accent, #3b82f6)',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            fontWeight: 500,
-          }}
-        >
-          OK
-        </button>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" className="secondaryButton" onClick={() => setProposal(null)}>
+            Discard
+          </button>
+          <button
+            type="button"
+            onClick={applyProposal}
+            disabled={!proposal || proposal.changes.length === 0}
+            style={{
+              padding: '8px 24px',
+              background: 'var(--color-accent, #3b82f6)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontSize: '0.9rem',
+              fontWeight: 500,
+            }}
+          >
+            Apply {proposal?.changes.length ?? 0} change{proposal?.changes.length === 1 ? '' : 's'}
+          </button>
+        </div>
       }
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', fontSize: '0.9rem', lineHeight: 1.6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-success, #22c55e)' }}>
-          <CheckCircle size={20} />
-          <strong>Project settings have been updated from your RoE document.</strong>
-        </div>
-
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontSize: '0.85rem', lineHeight: 1.5 }}>
         <p style={{ margin: 0 }}>
-          The following tabs may have been modified based on the parsed rules. Please review them before saving:
+          Nothing has been applied yet. These are the values the document proposes, each one
+          already checked against the same bounds the API enforces. Applying them fills the form;
+          you still have to save.
         </p>
 
-        <ul style={{ margin: 0, paddingLeft: '20px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <li><strong>Target &amp; Modules</strong> - target domain, IP addresses, scan modules, rate limits</li>
-          <li><strong>Tool Matrix</strong> - Tool Phase Restrictions (forbidden tools are disabled in the matrix)</li>
-          <li><strong>Rules of Engagement</strong> - excluded hosts, time windows, testing permissions, compliance</li>
-        </ul>
+        {proposal && proposal.changes.length === 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <CheckCircle size={18} />
+            <span>The document proposes nothing this project does not already have set.</span>
+          </div>
+        )}
 
-        <p style={{ margin: 0, padding: '10px 12px', background: 'var(--color-surface-alt, rgba(59,130,246,0.08))', borderRadius: '6px', borderLeft: '3px solid var(--color-accent, #3b82f6)' }}>
-          The Rules of Engagement will be enforced on both the <strong>recon pipeline</strong> (host exclusions, rate limits, time windows) and the <strong>agentic AI</strong> (tool restrictions, severity phase cap, prompt instructions).
-        </p>
+        {proposal && proposal.changes.length > 0 && (
+          <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+              <thead>
+                <tr style={{ textAlign: 'left' }}>
+                  <th style={{ padding: '4px 8px' }}>Setting</th>
+                  <th style={{ padding: '4px 8px' }}>Now</th>
+                  <th style={{ padding: '4px 8px' }}>Would become</th>
+                  <th style={{ padding: '4px 8px' }}>Where</th>
+                </tr>
+              </thead>
+              <tbody>
+                {proposal.changes.map(c => (
+                  <tr key={c.key} style={{ borderTop: '1px solid var(--color-border, #333)' }}>
+                    <td style={{ padding: '4px 8px', fontFamily: 'monospace' }} title={c.meaning}>{c.key}</td>
+                    <td style={{ padding: '4px 8px', opacity: 0.7 }}>{preview(c.before)}</td>
+                    <td style={{ padding: '4px 8px', fontWeight: 600 }}>{preview(c.after)}</td>
+                    <td style={{ padding: '4px 8px', opacity: 0.7 }}>{c.section ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {proposal && proposal.rejected.length > 0 && (
+          <div style={{ padding: '10px 12px', background: 'var(--color-surface-alt, rgba(234,179,8,0.08))', borderRadius: 6, borderLeft: '3px solid var(--color-warning, #eab308)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <AlertTriangle size={16} />
+              <strong>{proposal.rejected.length} value{proposal.rejected.length === 1 ? '' : 's'} refused</strong>
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {proposal.rejected.map(r => (
+                <li key={r.key}>
+                  <code>{r.key}</code> = {preview(r.value)} &mdash; {r.why}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {proposal && proposal.ignored.length > 0 && (
+          <p style={{ margin: 0, opacity: 0.75 }}>
+            Ignored, because no setting a document may write matches them:{' '}
+            <code>{proposal.ignored.join(', ')}</code>. The engagement&apos;s TARGET is among
+            these by design: a scope document configures this project, it does not re-point it.
+          </p>
+        )}
       </div>
     </Modal>
     </>

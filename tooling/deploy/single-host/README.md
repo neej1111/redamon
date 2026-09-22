@@ -12,9 +12,14 @@ provide (RedAmon is designed local-only): nginx + TLS + firewall + host hardenin
 
 **The security promise: one public origin over HTTPS.** From the internet only the webapp
 UI (443, plus 80 for the ACME challenge and an HTTP->HTTPS redirect) is reachable. The agent
-API, MCP servers, databases, orchestrator, and the reverse-shell catcher stay bound to
-loopback. nginx proxies the webapp and (same-origin) exactly the four agent WebSocket paths;
-nothing else on the agent is exposed.
+API, the outbound Kali MCP servers, databases, orchestrator, and the reverse-shell catcher
+stay bound to loopback. nginx proxies the webapp and (same-origin) exactly the four agent
+WebSocket paths; nothing else on the agent is exposed.
+
+**One exception, off by default: the INBOUND MCP server.** With
+`MCP_SERVER_ENABLED=true` the same origin also serves `/api/mcp-server`, a credentialed
+machine-facing endpoint an external AI agent connects to with a bearer token. It is a
+different shape of surface from the UI, so it has its own section below.
 
 ### Quick start
 
@@ -168,7 +173,7 @@ flag it manages. Control KB with `ENABLE_KB` only.
 | `OSV_DB_ECOSYSTEMS` | Comma-separated ecosystems to keep synced. Blank -> all eight (~280 MB). `npm` alone is ~208 MB and a noticeably shorter first install. An ecosystem you drop here is never refreshed, and a scan against it reports a missing ecosystem rather than a clean result. |
 | `OSV_DB_TTL_SECONDS` | Freshness window before a re-sync (blank -> 86400). |
 | `OSV_DB_REFRESH_TIMEOUT` | Ceiling on a single refresh, seconds (blank -> 900). |
-| `SCA_INTEL_AUTO_REFRESH` | `false` disables the supply-chain **incident catalog** (supplychainattack.org, ~5 MB) on an **air-gapped** host. Blank -> `true`. Unlike the OSV database this one is also seeded at install/update, because captured traffic is matched against it without any scan having run. |
+| `SCA_INTEL_AUTO_REFRESH` | `false` stops contacting the supply-chain **incident catalog** feed (supplychainattack.org, ~5 MB) on an **air-gapped** host; an empty catalog still receives the bundled offline copy, installed with no network. Blank -> `true`. Unlike the OSV database this one is also seeded at install/update, because captured traffic is matched against it without any scan having run. |
 | `SCA_INTEL_TTL_SECONDS` | Freshness window before a re-sync (blank -> 86400). |
 | `SCA_INTEL_RETRY_SECONDS` | Retry floor after a failed or rejected fetch (blank -> 3600), so a broken feed is not re-fetched on every scan. |
 | `SCA_INTEL_REFRESH_TIMEOUT` | Ceiling on a single refresh, seconds (blank -> 120). Lower than the OSV one because this feed is ~5 MB, not ~208 MB. |
@@ -247,6 +252,45 @@ The agent WebSocket URL is **baked into the webapp image at build time**
 Connection fields can be overridden positionally, e.g.
 `./deploy.sh init 1.2.3.4 ~/.ssh/redamon.pem ubuntu`. Use `--env NAME` to select
 `.env.NAME` for per-instance configs (`prod`, `staging`, a client name).
+
+## The inbound MCP server (off by default)
+
+`MCP_SERVER_ENABLED=true` exposes `/api/mcp-server` so your own AI agent can start recon
+scans, read the attack-surface graph and adjust recon tuning, acting as ONE RedAmon user
+inside that user's own projects. Tokens are minted per user in Global Settings ->
+**MCP Server**; the full model is in
+[docs/readmes/README.MCP.SERVER.md](../../../docs/readmes/README.MCP.SERVER.md).
+
+**Three gates sit in front of it, and all three must admit the agent.** This is the part
+that surprises people, because two of them are invisible from the app:
+
+| Layer | Controlled by | If it refuses |
+| --- | --- | --- |
+| Cloud Security Group | your provider | connection times out |
+| ufw on the app port | `OPERATOR_ALLOW_CIDRS` + `MCP_CLIENT_CIDRS` | connection refused/dropped, **nginx never sees it** |
+| nginx `location = /api/mcp-server` | `MCP_CLIENT_CIDRS`, `MCP_EDGE_ALLOW_BEARER` | 403 |
+
+The firewall filters by PORT and cannot see the URL path. So when
+`OPERATOR_ALLOW_CIDRS` is set (the recommended posture), an agent connecting from anywhere
+else is dropped **before** nginx, and `MCP_EDGE_ALLOW_BEARER=true` on its own changes
+nothing. Set `MCP_CLIENT_CIDRS` to your agent's egress range: it is admitted to the port,
+then narrowed by the nginx location to `/api/mcp-server` only. It does not gain the UI, the
+login page, or the agent WebSocket paths.
+
+Two hard rules the deploy enforces for you:
+
+- **`http-*` modes are refused outright.** The credential is a bearer token in a header;
+  over plaintext it is broadcast on every call and, unlike a session cookie, it outlives
+  the session. `ALLOW_INSECURE=1` does not override this.
+- **`GATE_MODE=basic_auth` returns 403** until `MCP_EDGE_ALLOW_BEARER=true`, because Basic
+  and Bearer cannot share one `Authorization` header.
+
+`deploy.sh verify` probes the endpoint and distinguishes the failure modes: 404 (disabled or
+the flag never reached the container), 401 (working), 403 (the edge gate ate the header).
+Repeated 401s are banned by the `redamon-mcp-auth` fail2ban jail.
+
+In `https-ip` with a self-signed certificate most MCP clients reject the connection. Use a
+real certificate (`TLS_MODE=provided`) or a domain.
 
 ## Security posture
 

@@ -468,7 +468,10 @@ def test_settings_camelcase_mapping():
 
     fake_project = {
         "ffufEnabled": True,
-        "ffufWordlist": "/custom/wordlist.txt",
+        # A path inside this project's own wordlist directory, which is where the
+        # upload endpoint puts one. An arbitrary path is DROPPED at settings
+        # load now - see the guardrail test below.
+        "ffufWordlist": "/app/recon/wordlists/test-project/custom.txt",
         "ffufThreads": 80,
         "ffufRate": 50,
         "ffufTimeout": 20,
@@ -497,7 +500,7 @@ def test_settings_camelcase_mapping():
         settings = fetch_project_settings("test-project", "http://localhost:3000")
 
     assert settings['FFUF_ENABLED'] is True
-    assert settings['FFUF_WORDLIST'] == "/custom/wordlist.txt"
+    assert settings['FFUF_WORDLIST'] == "/app/recon/wordlists/test-project/custom.txt"
     assert settings['FFUF_THREADS'] == 80
     assert settings['FFUF_RATE'] == 50
     assert settings['FFUF_TIMEOUT'] == 20
@@ -516,6 +519,32 @@ def test_settings_camelcase_mapping():
     assert settings['AI_IN_PIPELINE'] is True
     assert settings['AI_PIPELINE_MODEL'] == 'claude-haiku-4-5-20251001'
     print("PASS: test_settings_camelcase_mapping")
+
+
+def test_a_wordlist_outside_the_project_directory_is_dropped():
+    """
+    ffuf sends each wordlist LINE as a URL path and records which ones
+    responded, so a wordlist pointed at a file inside the scan container gets
+    its contents reflected into the graph and the scan output. That is
+    exfiltration, not just disclosure, and the column used to be closed on the
+    MCP surface for exactly that reason.
+
+    It is open now, and this is what replaced the closure: the path is resolved
+    at settings load and dropped to the shipped default if it escapes.
+    """
+    from recon.project_settings import DEFAULT_SETTINGS, fetch_project_settings
+
+    mock_resp = mock.MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"ffufWordlist": "/etc/shadow"}
+    mock_resp.raise_for_status = mock.MagicMock()
+
+    with mock.patch("requests.get", return_value=mock_resp):
+        settings = fetch_project_settings("test-project", "http://localhost:3000")
+
+    assert settings['FFUF_WORDLIST'] == DEFAULT_SETTINGS['FFUF_WORDLIST']
+    assert settings['FFUF_WORDLIST'].startswith('/usr/share/')
+    print("PASS: test_a_wordlist_outside_the_project_directory_is_dropped")
 
 
 # ===========================================================================

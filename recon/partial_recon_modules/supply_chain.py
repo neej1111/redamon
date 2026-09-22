@@ -17,7 +17,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from recon.partial_recon_modules.helpers import _is_valid_url
+from recon.partial_recon_modules.helpers import _is_valid_url, _scope_partial_urls
 
 
 def run_supply_chain(config: dict) -> None:
@@ -72,9 +72,9 @@ def run_supply_chain(config: dict) -> None:
             else:
                 print("[!][Partial Recon] Neo4j not reachable, cannot fetch graph inputs")
 
-    for url in user_urls:
-        if url not in target_urls:
-            target_urls.append(url)
+    target_urls, scope_hosts = _scope_partial_urls(
+        target_urls, user_urls, [], settings, domain,
+    )
 
     has_uploaded = False
     upload_dir = Path(f"/data/js-recon-uploads/{project_id}")
@@ -89,6 +89,7 @@ def run_supply_chain(config: dict) -> None:
 
     combined_result = {
         "domain": domain,
+        "subdomains": scope_hosts,
         "resource_enum": {"discovered_urls": target_urls},
         "http_probe": {"by_url": {}},
         "metadata": {"project_id": project_id, "modules_executed": []},

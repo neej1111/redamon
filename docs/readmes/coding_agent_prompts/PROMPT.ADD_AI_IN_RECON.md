@@ -56,6 +56,33 @@ once before the tool's main command is built, don't.
 5. **Prisma**: add `{tool}Ai{Feature} Boolean @default(false) @map("{tool}_ai_{feature}")`
    to `Project`. Apply via `prisma db push` (or `ALTER TABLE` + `prisma generate`
    if push wants to drop unrelated tables — never use `--accept-data-loss`).
+5b. **Describe the new column** in `recon_settings/registry.yaml`, then run
+   `python3 recon_settings/build.py`. Copy the shape of `ffufAiExtensions`,
+   `nucleiAiTags`, `nucleiAiResponseFilter` or `wafAiClassifier`:
+
+   ```yaml
+   {tool}Ai{Feature}:
+     tool: {tool}
+     runtime_key: "{TOOL}_AI_{FEATURE}"
+     unit: none
+     phase: {the tool's phase}
+     traffic: none
+     roe_capped: false
+     mcp: settable
+     group: llm
+     meaning: >-
+       Whether {tool} asks the LLM to pick its {feature}. ...
+   ```
+
+   `mcp: settable`, not denied. An AI toggle spends the owner's LLM budget, which
+   is a reason to BOUND it and to make the cost visible - not a reason to make it
+   unreachable from one of the two doors while the form still shows it. The
+   parity test fails a settable field with no form input and an input with no
+   classification, so the two stay equal by construction.
+
+   The build reads `Prisma.ProjectScalarFieldEnum` from the **generated** client,
+   not `schema.prisma`, so a green run straight after `db push` means nothing
+   until `prisma generate`.
 6. **Zod**: add the field to `webapp/src/lib/recon-preset-schema.ts` (and a
    one-line note in the catalog comment) so AI-generated presets see it.
 7. **UI: the toggle MUST exist in TWO places, BOUND to the same form field

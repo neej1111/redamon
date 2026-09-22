@@ -554,7 +554,7 @@ or expect file-not-found errors there.
 | `recon/main_recon_modules/ai_surface_probes/yara_rules/*.yar` | Vendored Cisco MCP YARA rules |
 | [recon/project_settings.py](../../recon/project_settings.py) | 15 settings + stealth overrides |
 | [recon/main.py](../../recon/main.py) | Wires Phase 4.5 (`_maybe_run_ai_surface`) |
-| [docs/readmes/GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) | Canonical list of every `ai_*` graph property |
+| [agentic/prompts/base.py](../../agentic/prompts/base.py) | Canonical list of every `ai_*` graph property - the "AI Surface Annotations" section of `TEXT_TO_CYPHER_SYSTEM` |
 
 ---
 

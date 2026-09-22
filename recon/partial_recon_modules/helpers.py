@@ -90,6 +90,57 @@ def _should_include_root_domain(settings: dict) -> bool:
     return any(p == "." or p.rstrip(".") == "" for p in subdomain_list)
 
 
+def _scope_partial_urls(
+    graph_urls: list,
+    user_urls: list,
+    graph_subdomains: list,
+    settings: dict,
+    domain: str,
+) -> tuple:
+    """Scope a partial run's URL inputs; returns ``(urls, scope_hosts)``.
+
+    Graph URLs outside the project scope are dropped rather than fetched: an
+    Endpoint written before JS recon enforced scope can carry a third-party
+    baseurl. URLs the user typed are kept, as web_crawling keeps them.
+    ``scope_hosts`` belongs in ``recon_data["subdomains"]``, the set the graph
+    mixins store nodes under (graph_db/mixins/recon/scope.py); left empty there,
+    the scope collapses to the apex and every subdomain's results are dropped.
+    """
+    from urllib.parse import urlparse
+
+    include_root_domain = _should_include_root_domain(settings)
+    requested_domain = (domain or "").strip(".").lower()
+
+    def _host(url: str) -> str:
+        try:
+            return (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return ""
+
+    urls, hosts, dropped = [], set(), 0
+    for url in graph_urls:
+        host = _host(url)
+        if not _is_host_in_scope(host, settings, requested_domain, include_root_domain):
+            dropped += 1
+            continue
+        hosts.add(host)
+        if url not in urls:
+            urls.append(url)
+    for url in user_urls:
+        host = _host(url)
+        if host:
+            hosts.add(host)
+        if url not in urls:
+            urls.append(url)
+    for sub in graph_subdomains:
+        if isinstance(sub, str) and _is_host_in_scope(sub, settings, requested_domain, include_root_domain):
+            hosts.add(sub.strip(".").lower())
+
+    if dropped:
+        print(f"[*][Partial Recon] Dropped {dropped} out-of-scope graph URL(s)")
+    return urls, sorted(hosts)
+
+
 def _is_host_in_scope(
     host: str,
     settings: dict,

@@ -179,12 +179,54 @@ export async function POST(request: NextRequest) {
     }
     const projectData = JSON.parse(await projectFile.async('text'))
 
-    // Strip fields that will be regenerated
-    const { id: _oldProjectId, userId: _oldUserId, createdAt: _pc, updatedAt: _pu, user: _u, roeDocumentDataBase64, ...projectFields } = projectData
+    // Strip fields that will be regenerated.
+    //
+    // `roeEnabled` is among them: it is DERIVED from whether any engagement
+    // limit is set, and an older bundle still carries the column. Replaying it
+    // would write a value nothing else believes, so it is dropped here and
+    // recomputed from the limits, which round-trip normally.
+    const {
+      id: _oldProjectId, userId: _oldUserId, createdAt: _pc, updatedAt: _pu, user: _u,
+      roeDocumentDataBase64,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      roeEnabled: _roeEnabledLegacy,
+      ...projectFields
+    } = projectData
 
     // Restore binary RoE document from base64 encoding
     if (roeDocumentDataBase64 && typeof roeDocumentDataBase64 === 'string') {
       projectFields.roeDocumentData = Buffer.from(roeDocumentDataBase64, 'base64')
+    }
+
+    // Import is a SECOND creation path, and it has to apply the same rule
+    // create_project does or it is the way around it. A bundle that claims a
+    // third-party engagement without a rate ceiling and an authorization record
+    // is refused rather than silently downgraded to internal: downgrading would
+    // strip the ceiling the exporting side declared and say nothing.
+    const authorizationsFile = zip.file('engagement/authorizations.json')
+    const importedAuthorizations: Record<string, unknown>[] = authorizationsFile
+      ? JSON.parse(await authorizationsFile.async('text'))
+      : []
+
+    if (projectFields.engagementKind === 'third_party') {
+      // The ceiling is the number alone now. There is no second switch that
+      // could leave it written and inert.
+      const ceilingOk = Number(projectFields.roeGlobalMaxRps ?? 0) > 0
+      if (!ceilingOk || importedAuthorizations.length === 0) {
+        return NextResponse.json(
+          {
+            error:
+              'This bundle declares a third-party engagement but is missing ' +
+              (!ceilingOk ? 'a non-zero request-rate ceiling' : '') +
+              (!ceilingOk && importedAuthorizations.length === 0 ? ' and ' : '') +
+              (importedAuthorizations.length === 0 ? 'its authorization record' : '') +
+              '. It was not imported. A third-party engagement must arrive with both, ' +
+              'because importing it without them would produce a project that can scan ' +
+              'somebody else\'s estate with no ceiling and nothing saying who permitted it.',
+          },
+          { status: 400 }
+        )
+      }
     }
 
     // Create new project under the specified user
@@ -194,6 +236,30 @@ export async function POST(request: NextRequest) {
         userId,
       },
     })
+
+    // The authorization records travel with the project. `recordedVia: import`
+    // says plainly that this row is a copy of a claim made elsewhere rather than
+    // one made here, and the original id is not reused: two installs holding the
+    // same row id would make the audit trail ambiguous.
+    for (const auth of importedAuthorizations) {
+      try {
+        await prisma.engagementAuthorization.create({
+          data: {
+            projectId: newProject.id,
+            documentSha256: String(auth.documentSha256 ?? ''),
+            documentKind: String(auth.documentKind ?? 'other'),
+            sourceUrl: String(auth.sourceUrl ?? ''),
+            programHandle: (auth.programHandle as string | null) ?? null,
+            issuedAt: new Date(String(auth.issuedAt)),
+            recordedVia: 'import',
+            recordedByUserId: userId,
+            summary: String(auth.summary ?? ''),
+          },
+        })
+      } catch (e) {
+        console.warn('Could not import an engagement authorization record:', e)
+      }
+    }
 
     const stats = {
       conversations: 0,

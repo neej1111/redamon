@@ -267,6 +267,11 @@ class ContainerManager:
         # (from the orchestrator's own /app/graph_db mount). Empty means it could
         # not be detected -- see _graph_db_mount for what happens then.
         self.graph_db_host_path = os.environ.get("GRAPH_DB_PATH", "").strip()
+        # Set by api.py after construction: the AUTO-DETECTED host path of
+        # recon_settings. Empty means the spawned scan uses the registry baked
+        # into its image, which is stale rather than absent -- see
+        # _recon_settings_mount.
+        self.recon_settings_host_path = os.environ.get("RECON_SETTINGS_PATH", "").strip()
         # Set by api.py after construction, same reason as graph_db_host_path:
         # the sca-intel refresh sidecar needs supply_chain_common's host path and
         # has no recon_path in scope (it runs off the scan-spawn path, not inside
@@ -696,6 +701,26 @@ class ContainerManager:
             kw["cap_drop"] = ["ALL"]
         return kw
 
+    def _recon_settings_mount(self) -> dict:
+        """The ``/app/recon_settings`` bind for a spawned scan container.
+
+        The registry decides every parameter's bound and every rate's engagement
+        ceiling, and the loader REFUSES to start a scan without it rather than
+        falling back to shipped defaults. So the scan images bake a copy, and
+        this mount only overlays the host's fresher one.
+
+        That makes the failure modes different from graph_db's, and better:
+        binding nothing costs freshness, never correctness. The derived
+        sibling-path GUESS is therefore not attempted at all. A guess Docker
+        cannot resolve is silently an empty auto-created directory, and an empty
+        directory here would shadow the baked registry and stop every scan,
+        which is a worse outcome than running a registry that is one edit old.
+        """
+        source = (getattr(self, "recon_settings_host_path", "") or "").strip()
+        if not source:
+            return {}
+        return {source: {"bind": "/app/recon_settings", "mode": "ro"}}
+
     def _graph_db_mount(self, derived: str, *, baked_into_image: bool) -> dict:
         """The ``/app/graph_db`` bind for a spawned scan container.
 
@@ -997,7 +1022,9 @@ class ContainerManager:
                     # Mount source code for development (no rebuild needed)
                     # Note: rw needed because output/data are subdirectories
                     f"{recon_path}": {"bind": "/app/recon", "mode": "rw"},
-                    # Mount graph_db module
+                    # The settings registry (a scan cannot start without one)
+                    # and the graph_db module.
+                    **self._recon_settings_mount(),
                     **self._graph_db_mount(sibling_host_path(recon_path, "graph_db"), baked_into_image=True),
                     # Supply-Chain recon (L2): shared runners + offline OSV DB.
                     join_host_path(parent_host_path(recon_path), "scanners", "supply_chain_common"): {"bind": "/app/supply_chain_common", "mode": "ro"},
@@ -2034,6 +2061,7 @@ class ContainerManager:
                     # privileged/arbitrary container; the broker rejects those.
                     BROKER_SOCKET_VOLUME: {"bind": "/var/run/broker", "mode": "rw"},
                     f"{recon_path}": {"bind": "/app/recon", "mode": "rw"},
+                    **self._recon_settings_mount(),
                     **self._graph_db_mount(sibling_host_path(recon_path, "graph_db"), baked_into_image=True),
                     # Supply-Chain recon (L2): shared runners + offline OSV DB.
                     join_host_path(parent_host_path(recon_path), "scanners", "supply_chain_common"): {"bind": "/app/supply_chain_common", "mode": "ro"},
@@ -2838,7 +2866,11 @@ class ContainerManager:
                     f"{recon_path}/output": {"bind": "/app/recon/output", "mode": "ro"},
                     # GVM scan output (read-write, for saving results)
                     f"{gvm_scan_path}/output": {"bind": "/app/gvm_scan/output", "mode": "rw"},
-                    # Mount graph_db module for Neo4j updates
+                    # The settings registry and graph_db. The registry is bound
+                    # into every scan container that gets graph_db, so a scanner
+                    # that starts reading it later finds it already there rather
+                    # than failing closed in production.
+                    **self._recon_settings_mount(),
                     **self._graph_db_mount(sibling_host_path(recon_path, "graph_db"), baked_into_image=True),
                     # Supply-Chain recon (L2): shared runners + offline OSV DB.
                     join_host_path(parent_host_path(recon_path), "scanners", "supply_chain_common"): {"bind": "/app/supply_chain_common", "mode": "ro"},
@@ -3257,7 +3289,9 @@ class ContainerManager:
                     f"{github_hunt_path}/output": {"bind": "/app/github_secret_hunt/output", "mode": "rw"},
                     # Mount github_secret_hunt source for development (no rebuild needed)
                     f"{github_hunt_path}": {"bind": "/app/github_secret_hunt", "mode": "rw"},
-                    # Mount graph_db module for Neo4j integration
+                    # The settings registry and graph_db -- see the recon spawn
+                    # above for why the registry rides along with graph_db.
+                    **self._recon_settings_mount(),
                     **self._graph_db_mount(sibling_host_path(parent_host_path(github_hunt_path), "graph_db"), baked_into_image=True),
                 },
                 command="python github_secret_hunt/main.py",
@@ -4508,6 +4542,7 @@ exit $RC
                     "/tmp/redamon": {"bind": "/tmp/redamon", "mode": "rw"},
                     f"{supply_chain_path}/output": {"bind": "/app/supply_chain_scan/output", "mode": "rw"},
                     f"{supply_chain_path}": {"bind": "/app/supply_chain_scan", "mode": "rw"},
+                    **self._recon_settings_mount(),
                     **self._graph_db_mount(sibling_host_path(parent_host_path(supply_chain_path), "graph_db"), baked_into_image=False),
                     sibling_host_path(supply_chain_path, "supply_chain_common"): {"bind": "/app/supply_chain_common", "mode": "ro"},
                     # Deep analysis (GuardDog) dispatches a job to the DIRTY

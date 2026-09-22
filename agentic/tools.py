@@ -18,7 +18,6 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_neo4j import Neo4jGraph
 
 from project_settings import get_setting, is_tool_allowed_in_phase
-from prompts import TEXT_TO_CYPHER_SYSTEM
 from graph_db.tenant_filter import (
     find_disallowed_write_operation as _shared_find_disallowed_write_operation,
     inject_tenant_filter as _shared_inject_tenant_filter,
@@ -576,8 +575,33 @@ class Neo4jToolManager:
                 "Please try again or check that the agent model is configured."
             )
 
-        schema = self.graph.get_schema
+        # The SEMANTIC schema, rendered from graph_db/schema_catalog.py. Same
+        # content the graph_schema tool serves on both surfaces, and today
+        # byte-identical to the TEXT_TO_CYPHER_SYSTEM constant it replaces.
+        from graph_schema_prompt import build_schema_document
 
+        # Rendered from the catalog and nothing else. The catalog declares every
+        # label, property and relationship, so there is no second source to
+        # consult and no database round trip on the path of every question.
+        # recon/tests/test_schema_catalog.py checks the catalog against the live
+        # graph, so falling behind is a failing test rather than a silent gap.
+        semantic_schema = build_schema_document()
+
+        # What THIS project actually holds, scoped to the tenant.
+        #
+        # This replaces `self.graph.get_schema`, which was apoc.meta.data and
+        # wrong here in three ways at once: database-GLOBAL, so every generation
+        # embedded the label and property shape of every other tenant's projects
+        # in the prompt; SAMPLED at 1000 nodes per label, so it could miss a rare
+        # property anyway; and computed once when Neo4jGraph was constructed and
+        # never refreshed, so a scan creating new labels mid-session stayed
+        # invisible to it.
+        #
+        # It is still needed because ~134 properties exist that the catalog does
+        # not yet describe (recon/tests/fixtures/undocumented_properties.json),
+        # and a property the model cannot name is a property it cannot query.
+        # Scoped, live and smaller is strictly better than global, stale and
+        # sampled for exactly the same job.
         # Build the prompt with optional error context for retries
         error_context = ""
         if previous_error and previous_cypher:
@@ -619,10 +643,7 @@ Incorporate the filter pattern into your MATCH clauses so results are scoped app
   Example: MATCH (s:Subdomain)-[:RESOLVES_TO]->(i:IP) WITH s, count(i) AS cnt WHERE cnt >= 4 MATCH (s)-[r:RESOLVES_TO]->(i:IP) RETURN s, r, i LIMIT 300
 - Never use RETURN with property accessors (e.g. n.name). Always RETURN the node/relationship variable itself."""
 
-        prompt = f"""{TEXT_TO_CYPHER_SYSTEM}
-
-## Current Database Schema
-{schema}
+        prompt = f"""{semantic_schema}
 {error_context}{view_scope}
 ## Important Rules
 - Generate ONLY the Cypher query, no explanations
@@ -823,6 +844,136 @@ Cypher Query:"""
             logger.error(f"Failed to set up Neo4j: {e}")
             logger.warning("Continuing without graph query tool")
             return None
+
+    def get_schema_tool(self) -> Optional[callable]:
+        """The graph schema INCLUDING its semantics.
+
+        Content source: graph_db/schema_catalog.py, the same text `_generate_cypher`
+        is prompted with on every call. One source, no second copy, nothing to
+        drift. It reads from code only, so it needs no database and no tenant,
+        and it is the one graph tool that still answers when Neo4j is down.
+        """
+        @tool
+        async def graph_schema() -> str:
+            """
+            Explain the attack-surface graph: what each node type MEANS, what its
+            properties mean and which values they take, which relationships
+            connect what and in which direction, and the distinctions that are
+            easy to get wrong (for example, Vulnerability and CVE are two
+            different node types).
+
+            Takes no arguments and reads no data, so it works even when a query
+            does not.
+
+            Use graph_summary first, as a general rule: it tells you what this
+            project actually contains.
+            Use query_graph to ask real questions in natural language. This is
+            the default and it handles the schema for you.
+            Use graph_schema when you need a deeper understanding of the graph,
+            including what things mean: a natural-language query did not work as
+            expected, or returned nothing or something surprising, and
+            graph_summary was not enough to explain why.
+            """
+            # Same content source as the MCP surface's graph_schema and as the
+            # Cypher generator, now via the catalog. Byte-identical to the old
+            # constant; see recon/tests/test_schema_catalog.py.
+            from graph_schema_prompt import build_schema_document
+            return build_schema_document()
+
+        return graph_schema
+
+    def get_summary_tool(self) -> Optional[callable]:
+        """What this project ACTUALLY contains: a count per label.
+
+        Exists because "no results" has two very different causes - the scan ran
+        and the project is clean, or that surface was never scanned - and an
+        agent that cannot tell them apart reports the second as the first, which
+        is a false negative in a security tool.
+
+        COUNTS ONLY, never sample values: sample values are live target data
+        (hostnames, secrets, endpoints) and belong in a deliberate query, not in
+        an orientation call.
+        """
+        manager = self
+
+        @tool
+        async def graph_summary() -> str:
+            """
+            Summarise what this project's attack-surface graph actually contains:
+            a count per node type and the relationships present.
+
+            Read this before concluding that something is ABSENT. If a node type
+            is missing entirely, that surface was never scanned - which is a very
+            different answer from "it was scanned and is clean".
+
+            Takes no arguments. Returns counts only, never sample values.
+
+            Use graph_summary first, as a general rule: it tells you what this
+            project actually contains.
+            Use query_graph to ask real questions in natural language. This is
+            the default and it handles the schema for you.
+            Use graph_schema when you need a deeper understanding of the graph,
+            including what things mean: a natural-language query did not work as
+            expected, or returned nothing or something surprising, and
+            graph_summary was not enough to explain why.
+            """
+            # Same tenant source as query_graph: the request-scoped contextvars,
+            # never settings or arguments.
+            user_id = current_user_id.get()
+            project_id = current_project_id.get()
+            if not user_id or not project_id:
+                return "Error: Missing user_id or project_id context"
+
+            # Fixed, server-side query: a label census has no labelled pattern,
+            # so it cannot go through the caller-supplied Cypher path. The tenant
+            # filter and the mute/stale exclusions are written out by hand for
+            # the same reason the /graph/exec fixed ops are.
+            nodes_cypher = (
+                "MATCH (n) "
+                "WHERE n.user_id = $tenant_user_id AND n.project_id = $tenant_project_id "
+                "AND NOT n:Muted AND n.stale_since IS NULL "
+                "UNWIND labels(n) AS label "
+                "RETURN label, count(*) AS count ORDER BY label"
+            )
+            rels_cypher = (
+                "MATCH (a)-[r]->(b) "
+                "WHERE a.user_id = $tenant_user_id AND a.project_id = $tenant_project_id "
+                "AND NOT a:Muted AND NOT b:Muted "
+                "AND a.stale_since IS NULL AND b.stale_since IS NULL "
+                "RETURN type(r) AS type, count(*) AS count ORDER BY type"
+            )
+            params = {"tenant_user_id": user_id, "tenant_project_id": project_id}
+
+            try:
+                if manager.graph is None:
+                    manager.graph = Neo4jGraph(
+                        url=manager.uri, username=manager.user, password=manager.password
+                    )
+                nodes = manager.graph.query(nodes_cypher, params=params)
+                rels = manager.graph.query(rels_cypher, params=params)
+            except Exception as e:
+                logger.error(f"[{user_id}/{project_id}] graph_summary failed: {e}")
+                # A plain failure, NEVER an empty summary: an empty summary reads
+                # as "nothing has ever been scanned".
+                return "Error: could not read the graph summary."
+
+            if not nodes:
+                return (
+                    "This project's graph is EMPTY: no nodes of any type. "
+                    "Nothing has been scanned yet, so an absent finding here "
+                    "means 'not looked for', not 'not present'."
+                )
+
+            lines = ["Node types in this project (count):"]
+            lines += [f"  {r['label']}: {r['count']}" for r in nodes]
+            if rels:
+                lines.append("Relationships present (count):")
+                lines += [f"  {r['type']}: {r['count']}" for r in rels]
+            else:
+                lines.append("No relationships between nodes yet.")
+            return "\n".join(lines)
+
+        return graph_summary
 
 
 # =============================================================================
@@ -1882,6 +2033,8 @@ class PhaseAwareToolExecutor:
         shodan_tool: Optional[callable] = None,
         google_dork_tool: Optional[callable] = None,
         tradecraft_tool: Optional[callable] = None,
+        graph_schema_tool: Optional[callable] = None,
+        graph_summary_tool: Optional[callable] = None,
     ):
         self.mcp_manager = mcp_manager
         self.graph_tool = graph_tool
@@ -1893,9 +2046,15 @@ class PhaseAwareToolExecutor:
         # if they happen to raise a look-alike error.
         self._mcp_tool_names: set = set()
 
-        # Register graph tool
+        # Register the graph tools. All three go in under the SAME condition:
+        # get_tool() returns None when Neo4j setup fails, and a companion that
+        # was offered anyway would fail on every call instead of disappearing.
         if graph_tool:
             self._all_tools["query_graph"] = graph_tool
+            if graph_schema_tool:
+                self._all_tools["graph_schema"] = graph_schema_tool
+            if graph_summary_tool:
+                self._all_tools["graph_summary"] = graph_summary_tool
 
         # Register web search tool
         if web_search_tool:
@@ -2290,6 +2449,10 @@ class PhaseAwareToolExecutor:
         async def _invoke(active_tool) -> str:
             if tool_name == "query_graph":
                 output = await active_tool.ainvoke(tool_args.get("question", ""))
+            elif tool_name in ("graph_schema", "graph_summary"):
+                # Zero-argument companions. An empty dict rather than "" because
+                # a positional string would bind to a parameter they do not have.
+                output = await active_tool.ainvoke({})
             elif tool_name == "web_search":
                 output = await active_tool.ainvoke(tool_args.get("query", ""))
             elif tool_name == "shodan":

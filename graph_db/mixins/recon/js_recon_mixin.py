@@ -8,6 +8,60 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 from graph_db.cpe_resolver import _is_ip_address
+from graph_db.mixins.recon.scope import build_host_scope, host_in_scope
+
+# merge_discovered_hostnames (recon/helpers/target_helpers.py) tags each name it
+# admits into dns.subdomains with one of these, after its apex allow-list, RoE,
+# syntax and resolve checks. Untagged dns.subdomains entries are NOT vetted: the
+# domain run copies that dict wholesale, RoE-excluded names included.
+_VETTED_HOSTNAME_SOURCES = ("js_recon", "tlsx", "certificate_san")
+
+
+def js_endpoint_scope(recon_data: dict) -> set:
+    """Hosts a JS-extracted Endpoint may be stored under; empty set = no filter.
+
+    build_host_scope is the set every recon mixin agrees on, but it only reads
+    the top-level subdomain list. A subdomain JS recon itself found in the code
+    reaches dns.subdomains alone, so it is added here, provided the containment
+    in merge_discovered_hostnames admitted it. A filtered run (IP mode, or an
+    explicit subdomain list) keeps exactly the targets the user gave.
+    """
+    scope = build_host_scope(recon_data)
+    if not scope or (recon_data.get("metadata") or {}).get("filtered_mode"):
+        return scope
+    subs = (recon_data.get("dns") or {}).get("subdomains")
+    if isinstance(subs, dict):
+        scope |= {
+            name.strip().lower()
+            for name, entry in subs.items()
+            if isinstance(name, str) and isinstance(entry, dict)
+            and entry.get("source") in _VETTED_HOSTNAME_SOURCES
+        }
+    scope.discard("")
+    return scope
+
+
+def split_absolute_endpoint(path: str, source_js: str) -> tuple:
+    """``(base_url, path)`` when an extracted ``path`` is really a whole URL, else ``('', path)``.
+
+    Config, GraphQL, WebSocket and custom-keyword matches carry the full URL in
+    ``path``. Stored as-is they became ``{baseurl: <host of the JS file>, path:
+    'https://other.host/v1'}``, a foreign URL filed under the target. A WebSocket
+    belongs to the HTTP origin that serves its upgrade handshake.
+    """
+    candidate = path.strip()
+    if candidate.startswith('//'):
+        scheme = urlparse(source_js).scheme if source_js else ''
+        candidate = f"{scheme if scheme in ('http', 'https') else 'https'}:{candidate}"
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return '', path
+    scheme = {'ws': 'http', 'wss': 'https'}.get(parsed.scheme, parsed.scheme)
+    if scheme not in ('http', 'https') or not parsed.netloc:
+        return '', path
+    return f"{scheme}://{parsed.netloc}", parsed.path or '/'
+
 
 class JsReconMixin:
     def update_graph_from_js_recon(self, recon_data: dict, user_id: str, project_id: str) -> dict:
@@ -19,10 +73,13 @@ class JsReconMixin:
         - JsReconFinding(js_file) -[:HAS_JS_FINDING]-> JsReconFinding (findings)
         - JsReconFinding(js_file) -[:HAS_SECRET]-> Secret
         - JsReconFinding(js_file) -[:HAS_ENDPOINT]-> Endpoint
+        - BaseURL -[:HAS_ENDPOINT]-> Endpoint (network endpoints; not uploaded JS)
 
         Each analyzed JS file becomes a JsReconFinding node with finding_type='js_file'.
         All findings discovered in that file are linked to the file node, not directly
-        to Domain/BaseURL.
+        to Domain/BaseURL. An Endpoint is written only for an in-scope host
+        (js_endpoint_scope); third-party hosts are recorded as external domains
+        by the JS recon module instead.
         """
         js_recon_data = recon_data.get("js_recon", {})
         if not js_recon_data:
@@ -33,6 +90,7 @@ class JsReconMixin:
             "findings_created": 0,
             "secrets_created": 0,
             "endpoints_created": 0,
+            "endpoints_out_of_scope": 0,
             "relationships_created": 0,
             "errors": [],
         }
@@ -584,6 +642,7 @@ class JsReconMixin:
 
             # --- 3. Endpoint nodes (source='js_recon') ---
             created_endpoints = set()
+            endpoint_scope = js_endpoint_scope(recon_data)
             for ep in js_recon_data.get("endpoints", []):
                 try:
                     # Drop only endpoints a probe positively confirmed as dead.
@@ -601,12 +660,21 @@ class JsReconMixin:
                     base_url = ep.get("base_url", "")
                     is_upload = _is_uploaded(source_js)
 
+                    absolute_base, absolute_path = split_absolute_endpoint(path, source_js)
+                    if absolute_base:
+                        base_url, path = absolute_base, absolute_path
+
                     if not base_url and source_js and not is_upload:
                         base_url = _derive_base_url(source_js)
 
                     if not path:
                         continue
                     if not base_url and not is_upload:
+                        continue
+                    # Only a relative path in uploaded JS has no host to judge;
+                    # it stays under the 'upload' pseudo base.
+                    if base_url and not host_in_scope(base_url, endpoint_scope):
+                        stats["endpoints_out_of_scope"] += 1
                         continue
 
                     ep_key = f"{method}:{path}:{base_url or 'upload'}"
@@ -665,6 +733,26 @@ class JsReconMixin:
 
                     if _link_endpoint_to_file(session, source_js, path, method, effective_baseurl):
                         stats["relationships_created"] += 1
+
+                    if base_url:
+                        # Same ownership write as resource_enum. MERGE, not MATCH:
+                        # an in-scope host that only the JS names (an unprobed
+                        # port, a subdomain found in the code) has no BaseURL yet.
+                        owner = session.run(
+                            """
+                            MERGE (bu:BaseURL {url: $baseurl, user_id: $uid, project_id: $pid})
+                            ON CREATE SET bu.source = 'js_recon',
+                                          bu.updated_at = datetime()
+                            WITH bu
+                            MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl, user_id: $uid, project_id: $pid})
+                            MERGE (bu)-[r:HAS_ENDPOINT]->(e)
+                            RETURN count(r) AS linked
+                            """,
+                            baseurl=base_url, path=path, method=method,
+                            uid=user_id, pid=project_id,
+                        ).single()
+                        if owner and int(owner.get("linked", 0) or 0) > 0:
+                            stats["relationships_created"] += 1
 
                 except Exception as e:
                     stats["errors"].append(f"JS Recon Endpoint node failed: {e}")

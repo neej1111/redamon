@@ -13,6 +13,8 @@ Part of the recon_mixin.py split.
 
 import json
 
+from graph_db.technology_identity import resolve_tech_name, resolve_tech_version
+
 # NOTE: `recon.helpers.ai_signal_catalog` is imported lazily inside
 # `_aisr_annotate_host` (the only consumer). The `recon` package ships in the
 # scan containers (which volume-mount it) but NOT in the persistent agent image,
@@ -199,9 +201,11 @@ class AiSurfaceReconMixin:
             cat_val = julius.get("category") or "ai-runtime"
             if not str(cat_val).startswith("ai-"):
                 cat_val = "ai-runtime"
+            svc = resolve_tech_name(session, svc, user_id, project_id)
+            version = resolve_tech_version(session, svc, "", user_id, project_id)
             session.run(
                 """
-                MERGE (t:Technology {name: $name, version: '', user_id: $uid, project_id: $pid})
+                MERGE (t:Technology {name: $name, version: $version, user_id: $uid, project_id: $pid})
                 SET t.category = $cat, t.source = 'ai-surface-recon', t.updated_at = datetime()
                 WITH t
                 MERGE (b:BaseURL {url: $baseurl, user_id: $uid, project_id: $pid})
@@ -214,7 +218,7 @@ class AiSurfaceReconMixin:
                 SET r.detected_by = 'ai-surface-recon-julius',
                     r.confidence = COALESCE(r.confidence, 100)
                 """,
-                name=svc, cat=cat_val, path=primary_path, baseurl=base_url,
+                name=svc, version=version, cat=cat_val, path=primary_path, baseurl=base_url,
                 uid=user_id, pid=project_id,
             )
             stats["technologies_promoted"] += 1
@@ -292,9 +296,11 @@ class AiSurfaceReconMixin:
         port = vdb.get("port")
         if not tech:
             return
+        tech = resolve_tech_name(session, tech, user_id, project_id)
+        version = resolve_tech_version(session, tech, "", user_id, project_id)
         session.run(
             """
-            MERGE (t:Technology {name: $name, version: '', user_id: $uid, project_id: $pid})
+            MERGE (t:Technology {name: $name, version: $version, user_id: $uid, project_id: $pid})
             SET t.category = 'ai-vector-db', t.source = 'ai-surface-recon',
                 t.updated_at = datetime()
             WITH t
@@ -318,6 +324,6 @@ class AiSurfaceReconMixin:
                 MERGE (b)-[r3:USES_TECHNOLOGY]->(t)
                 SET r3.detected_by = 'ai-surface-recon-probe')
             """,
-            name=tech, ip=ip, port=port, uid=user_id, pid=project_id,
+            name=tech, version=version, ip=ip, port=port, uid=user_id, pid=project_id,
         )
         stats["technologies_promoted"] += 1

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from auth import is_orchestrator_request_authorized
+from recon_settings.engagement import derive_roe_enabled
 from container_manager import ContainerManager
 from admission_ledger import AdmissionError
 
@@ -151,6 +152,23 @@ except RuntimeError:
         "volumes and recreate the container (or set GRAPH_DB_PATH) so spawned scans "
         "bind the real graph_db on every platform."
     )
+# The recon settings registry, bound into every spawned scan container for the
+# same reason graph_db is: it is baked into the scan images, and a mount of the
+# host copy is what lets a registry edit reach a scan without a rebuild. Unlike
+# graph_db, a missing registry is not a silent degradation - the loader refuses
+# to start the scan - so the baked copy is the safety net and this mount is the
+# freshness one.
+try:
+    RECON_SETTINGS_PATH = _get_host_path(_host_mounts, "/app/recon_settings", "RECON_SETTINGS_PATH")
+except RuntimeError:
+    RECON_SETTINGS_PATH = ""
+    logger.warning(
+        "recon_settings is not mounted into the orchestrator, so its host path cannot be "
+        "auto-detected. Spawned scans will use the registry baked into their image, which "
+        "means a registry edit needs a rebuild to take effect. Add "
+        "'./recon_settings:/app/recon_settings:ro' to the recon-orchestrator volumes and "
+        "recreate the container (or set RECON_SETTINGS_PATH)."
+    )
 try:
     AI_ATTACK_SURFACE_PATH = _get_host_path(_host_mounts, "/app/ai_attack_surface_scan", "AI_ATTACK_SURFACE_PATH")
 except RuntimeError:
@@ -183,6 +201,110 @@ def _trusted_webapp_base() -> str:
     network with the webapp, so ``http://webapp:3000`` resolves by DNS.
     """
     return os.environ.get("WEBAPP_API_URL", "http://webapp:3000").rstrip("/")
+
+
+def _fetch_project_for_preflight(project_id: str) -> dict:
+    """Fetch the project settings the guardrail / RoE pre-flight needs.
+
+    Fails CLOSED. Any fetch failure or non-200 raises 503 naming the
+    unreachable dependency, rather than logging "proceeding" and running the
+    scan with neither the hard guardrail nor the RoE window applied. Scan
+    starts became unattended and remote with the MCP surface, so "could not
+    verify scope, started anyway" is no longer an acceptable degradation
+    (mcp_plan.md P0-1). The guardrail is still applied at project creation and
+    RoE excluded hosts inside the recon container, so this remains defence in
+    depth rather than the only gate.
+    """
+    import urllib.request
+    import json as json_mod
+
+    url = f"{_trusted_webapp_base()}/api/projects/{project_id}"
+    req = urllib.request.Request(url)
+    req.add_header("X-Internal-Key", os.environ.get("INTERNAL_API_KEY", ""))
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status != 200:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Cannot verify scan scope: the webapp project fetch "
+                        f"returned HTTP {resp.status}. Refusing to start."
+                    ),
+                )
+            return json_mod.loads(resp.read().decode())
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Cannot verify scan scope: the webapp is unreachable "
+                f"({type(e).__name__}). Refusing to start."
+            ),
+        )
+
+
+def _check_roe_time_window(project: dict) -> None:
+    """Enforce the RoE time-window. Raises 403 outside the window.
+
+    A malformed timezone is a bad *setting*, not an unknown scope, so it raises
+    400 naming the offending setting instead of silently passing (mcp_plan.md
+    P0-1). Only that narrow carve-out is tolerated; every other failure
+    propagates.
+    """
+    # The THIRD enforcement point, after recon and the agent. It gates on the
+    # DERIVED value like the other two: gating on the column would leave this
+    # 403 keyed on something nothing writes, and the window would quietly stop
+    # blocking.
+    if not (derive_roe_enabled(project) and project.get('roeTimeWindowEnabled')):
+        return
+
+    from datetime import datetime
+    try:
+        import zoneinfo
+    except ImportError:
+        from backports import zoneinfo
+
+    tz_name = project.get('roeTimeWindowTimezone', 'UTC')
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"RoE time window: invalid timezone '{tz_name}'. "
+                f"Fix the project's RoE time-window timezone setting."
+            ),
+        )
+
+    now_local = datetime.now(tz)
+    day_name = now_local.strftime('%A').lower()
+    allowed_days = project.get('roeTimeWindowDays', [])
+    start_time = project.get('roeTimeWindowStartTime', '09:00')
+    end_time = project.get('roeTimeWindowEndTime', '18:00')
+    current_time = now_local.strftime('%H:%M')
+
+    if day_name not in allowed_days:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"RoE time window: testing not allowed on {day_name.capitalize()}. "
+                f"Allowed days: {', '.join(d.capitalize() for d in allowed_days)}"
+            ),
+        )
+    # Handle overnight windows (e.g. 22:00 - 06:00)
+    if start_time <= end_time:
+        outside = current_time < start_time or current_time > end_time
+    else:
+        outside = current_time < start_time and current_time > end_time
+    if outside:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"RoE time window: current time {current_time} {tz_name} is "
+                f"outside allowed window ({start_time}-{end_time})"
+            ),
+        )
 
 
 def _recon_output_files(output_dir, project_id: str) -> list:
@@ -253,6 +375,12 @@ AI_ATTACK_REAP_INTERVAL_S = int(os.environ.get("AI_ATTACK_REAP_INTERVAL", "30"))
 TRAFFIC_MAINTENANCE_INTERVAL_S = int(os.environ.get("TRAFFIC_MAINTENANCE_INTERVAL", "3600"))
 _last_traffic_maintenance = 0.0
 
+# The webapp has no scheduler of its own (no instrumentation.ts, no setInterval),
+# so its periodic jobs are driven from this loop. Daily is ample for pruning
+# tokens that have been dead for 90 days.
+MCP_TOKEN_PRUNE_INTERVAL_S = int(os.environ.get("MCP_TOKEN_PRUNE_INTERVAL", "86400"))
+_last_mcp_token_prune = 0.0
+
 
 async def _post_job_queue_reconcile(cm) -> None:
     """Post the set of projects with a live scan so the webapp can close finished
@@ -285,6 +413,23 @@ async def _maybe_run_traffic_maintenance() -> None:
     await asyncio.to_thread(
         _webapp_request, f"{_webapp_base()}/api/traffic/maintenance", key,
         "POST", {}, 30.0, "trafficMaintenance",
+    )
+
+
+async def _maybe_prune_mcp_tokens() -> None:
+    """POST /api/internal/mcp-tokens/prune at most once per TTL. Best-effort."""
+    global _last_mcp_token_prune
+    import time
+    now = time.monotonic()
+    if now - _last_mcp_token_prune < MCP_TOKEN_PRUNE_INTERVAL_S:
+        return
+    _last_mcp_token_prune = now
+    key = _webapp_internal_key()
+    if not key:
+        return
+    await asyncio.to_thread(
+        _webapp_request, f"{_webapp_base()}/api/internal/mcp-tokens/prune", key,
+        "POST", {}, 30.0, "mcpTokenPrune",
     )
 
 
@@ -327,6 +472,10 @@ async def _ai_attack_reaper():
                     await _maybe_run_traffic_maintenance()
                 except Exception as e:
                     logger.warning(f"traffic maintenance failed: {e}")
+                try:
+                    await _maybe_prune_mcp_tokens()
+                except Exception as e:
+                    logger.warning(f"mcp token prune failed: {e}")
     except asyncio.CancelledError:
         pass
 
@@ -445,6 +594,10 @@ async def lifespan(app: FastAPI):
     # /app/graph_db bind. Empty => container_manager falls back to the legacy
     # sibling-derivation guess (and refuses to shadow a baked-in copy with it).
     container_manager.graph_db_host_path = GRAPH_DB_PATH
+    # Auto-detected recon_settings host path. Empty => the spawned scan uses the
+    # registry baked into its image rather than the host's, which is stale rather
+    # than absent, so the scan still starts.
+    container_manager.recon_settings_host_path = RECON_SETTINGS_PATH
     # Host path of the recon dir, used by the sca-intel refresh sidecar to derive
     # supply_chain_common's host path (it runs off the scan-spawn path and so has
     # no recon_path argument of its own).
@@ -784,53 +937,85 @@ async def get_defaults():
         # Import DEFAULT_SETTINGS from project_settings.py
         from project_settings import DEFAULT_SETTINGS
 
-        # Runtime-only settings that should NOT be sent to frontend/database
-        # These are used by recon module at runtime, not stored in PostgreSQL
-        RUNTIME_ONLY_KEYS = {
-            'PROJECT_ID',
-            'USER_ID',
-            'TARGET_DOMAIN',   # Provided by user, not a default
-            # Same reasoning: a per-project target list, never a global default.
-            'DOMAIN_BATCH_MODE',
-            'DOMAIN_BATCH_GROUPS',
-            # API keys fetched at runtime from user's global settings (not stored per-project)
-            'SHODAN_API_KEY',
-            'URLSCAN_API_KEY',
-            'CENSYS_API_TOKEN',
-            'CENSYS_ORG_ID',
-            'OTX_API_KEY',
-            'NETLAS_API_KEY',
-            'VIRUSTOTAL_API_KEY',
-            'ZOOMEYE_API_KEY',
-            'CRIMINALIP_API_KEY',
-            'FOFA_EMAIL',
-            'FOFA_API_KEY',
-            'UNCOVER_QUAKE_API_KEY',
-            'UNCOVER_HUNTER_API_KEY',
-            'UNCOVER_PUBLICWWW_API_KEY',
-            'UNCOVER_HUNTERHOW_API_KEY',
-            'UNCOVER_GOOGLE_API_KEY',
-            'UNCOVER_GOOGLE_API_CX',
-            'UNCOVER_ONYPHE_API_KEY',
-            'UNCOVER_DRIFTNET_API_KEY',
-            # Origin-IP Discovery passive-DNS credentials (per-user, never a default)
-            'SECURITYTRAILS_API_KEY',
-            'VIEWDNS_API_KEY',
-            # Authenticated-session profile: a per-project secret, never a
-            # default and never in the frontend defaults payload.
-            'AUTH_PROFILE',
-        }
+        # Runtime-only settings that must NOT reach the frontend or the database.
+        #
+        # DERIVED from the recon settings registry rather than hand-listed. The
+        # list this replaced had drifted in both directions: it named FOFA_EMAIL,
+        # which no longer exists, while a key added to DEFAULT_SETTINGS without
+        # being added here would be sent to the browser as a project default and
+        # then rejected by Prisma as an unknown column on save.
+        #
+        # Three classes, all of which the registry already records:
+        #   source: user_account   an API credential fetched per scan
+        #   source: internal       a value the pipeline computes, not a setting
+        #   source: project_relation  the authenticated session, deliberately a
+        #                          relation so it never reaches the browser
+        #
+        # Deriving it also fixes a documented workaround: the ProjectForm's
+        # preset-apply path skips any /defaults key that is not already in the
+        # form, because this payload carried settings that are NOT Project
+        # columns (takeoverCnameValidationEnabled among them) and writing one
+        # back made the save fail with a Prisma "Unknown argument" error. Those
+        # keys are exactly `source: internal`, so they are gone from the payload
+        # now rather than filtered out downstream.
+        try:
+            from settings_registry import runtime_only as _registry_runtime_only
+        except ImportError:  # pragma: no cover - the repo layout
+            from recon.settings_registry import runtime_only as _registry_runtime_only
 
-        # Convert snake_case keys to camelCase for frontend
+        RUNTIME_ONLY_KEYS = set(_registry_runtime_only())
+        # Plus the four the registry cannot infer. Each is a Project COLUMN, so
+        # it is not runtime-only in the registry's sense; it is simply not a
+        # global default. The rest of the targeting block legitimately has one:
+        # an empty subdomain list, and the shipped `_redamon-verify` TXT prefix.
+        RUNTIME_ONLY_KEYS.update({
+            "USER_ID",          # the owner, set by the loader from the API response
+            "TARGET_DOMAIN",    # per-project, provided by the operator
+            "DOMAIN_BATCH_MODE",
+            "DOMAIN_BATCH_GROUPS",
+        })
+
+
+        # The column name for each runtime key, from the registry rather than
+        # from a snake-to-camel conversion.
+        #
+        # The conversion cannot recover an intercap, and nine settings have one:
+        # CRIMINALIP_ENABLED is the column `criminalIpEnabled`, not
+        # `criminalipEnabled`. Those nine have therefore NEVER reached a new
+        # project form, because the ProjectForm only applies a /defaults key it
+        # already has - which is also why nobody noticed. The registry knows the
+        # real mapping, so it answers.
+        try:
+            from settings_registry import by_runtime_key as _registry_by_runtime_key
+        except ImportError:  # pragma: no cover - the repo layout
+            from recon.settings_registry import by_runtime_key as _registry_by_runtime_key
+
+        _column_for = {k: v["column"] for k, v in _registry_by_runtime_key().items()}
+
         def to_camel_case(snake_str: str) -> str:
+            """Fallback for a key the registry has never heard of."""
             components = snake_str.lower().split('_')
             return components[0] + ''.join(x.title() for x in components[1:])
 
         camel_case_defaults = {
-            to_camel_case(k): v
+            _column_for.get(k) or to_camel_case(k): v
             for k, v in DEFAULT_SETTINGS.items()
             if k not in RUNTIME_ONLY_KEYS
         }
+
+        # An engagement LIMIT has no global default: it is a property of one
+        # engagement, not of the installation. Emitting one is worse than
+        # useless, because the ProjectForm's preset-apply path resets every form
+        # field that appears in this payload BEFORE applying the preset - so a
+        # roeGlobalMaxRps: 0 here silently zeroes a configured rate ceiling and
+        # empties the exclusion list on every preset apply.
+        #
+        # Filtered by COLUMN and derived from the registry group, so a newly
+        # classified limit is excluded the day it is classified. One helper,
+        # shared with the agent's own /defaults, so the two cannot disagree.
+        from recon_settings.engagement import strip_engagement_limits
+
+        strip_engagement_limits(camel_case_defaults)
 
         # Also import GVM scan defaults (use importlib to avoid module name collision
         # with recon's project_settings already cached above)
@@ -892,86 +1077,41 @@ async def start_recon(project_id: str, request: ReconStartRequest):
     if not container_manager:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    # RoE time window check: fetch project settings and verify
+    # Guardrail / RoE pre-flight: fetch project settings and verify. Fails
+    # CLOSED — a fetch failure refuses the start (503) rather than proceeding
+    # unverified (mcp_plan.md P0-1).
     if request.webapp_api_url:
-        try:
-            import urllib.request
-            import json as json_mod
-            from datetime import datetime
-            try:
-                import zoneinfo
-            except ImportError:
-                from backports import zoneinfo
+        project = _fetch_project_for_preflight(project_id)
 
-            url = f"{_trusted_webapp_base()}/api/projects/{project_id}"
-            req = urllib.request.Request(url)
-            req.add_header("X-Internal-Key", os.environ.get("INTERNAL_API_KEY", ""))
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    project = json_mod.loads(resp.read().decode())
+        # Hard guardrail: deterministic, non-disableable — always blocks
+        # government/public domains.
+        if not project.get('ipMode', False):
+            from hard_guardrail import is_hard_blocked
+            from batch_scope import guardrail_targets
+            # Domain batch has NO targetDomain: its targets are the derived
+            # group roots. Checking targetDomain alone would hand every batch
+            # a free pass through the one control that cannot be switched off,
+            # so check whatever this project actually scans.
+            targets = guardrail_targets(project)
+            if project.get('domainBatchMode', False) and not targets:
+                # Fail CLOSED: batch mode with nothing to check means the
+                # groups are missing or malformed, not that there is
+                # nothing to guard.
+                raise HTTPException(
+                    status_code=400,
+                    detail="Domain batch project has no valid domain groups. "
+                           "Re-save the project's hostname list before scanning.",
+                )
 
-                    # Hard guardrail: deterministic, non-disableable — always blocks government/public domains
-                    if not project.get('ipMode', False):
-                        from hard_guardrail import is_hard_blocked
-                        from batch_scope import guardrail_targets
-                        # Domain batch has NO targetDomain: its targets are the derived
-                        # group roots. Checking targetDomain alone would hand every batch
-                        # a free pass through the one control that cannot be switched off,
-                        # so check whatever this project actually scans.
-                        targets = guardrail_targets(project)
-                        if project.get('domainBatchMode', False) and not targets:
-                            # Fail CLOSED: batch mode with nothing to check means the
-                            # groups are missing or malformed, not that there is
-                            # nothing to guard.
-                            raise HTTPException(
-                                status_code=400,
-                                detail="Domain batch project has no valid domain groups. "
-                                       "Re-save the project's hostname list before scanning.",
-                            )
+            for target in targets:
+                blocked, reason = is_hard_blocked(target)
+                if blocked:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Hard guardrail: {reason}"
+                    )
 
-                        for target in targets:
-                            blocked, reason = is_hard_blocked(target)
-                            if blocked:
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=f"Hard guardrail: {reason}"
-                                )
-
-                    if project.get('roeEnabled') and project.get('roeTimeWindowEnabled'):
-                        tz_name = project.get('roeTimeWindowTimezone', 'UTC')
-                        try:
-                            tz = zoneinfo.ZoneInfo(tz_name)
-                            now_local = datetime.now(tz)
-                            day_name = now_local.strftime('%A').lower()
-                            allowed_days = project.get('roeTimeWindowDays', [])
-                            start_time = project.get('roeTimeWindowStartTime', '09:00')
-                            end_time = project.get('roeTimeWindowEndTime', '18:00')
-                            current_time = now_local.strftime('%H:%M')
-
-                            if day_name not in allowed_days:
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=f"RoE time window: testing not allowed on {day_name.capitalize()}. Allowed days: {', '.join(d.capitalize() for d in allowed_days)}"
-                                )
-                            # Handle overnight windows (e.g. 22:00 - 06:00)
-                            if start_time <= end_time:
-                                outside = current_time < start_time or current_time > end_time
-                            else:
-                                # Overnight: allowed if AFTER start OR BEFORE end
-                                outside = current_time < start_time and current_time > end_time
-                            if outside:
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=f"RoE time window: current time {current_time} {tz_name} is outside allowed window ({start_time}-{end_time})"
-                                )
-                        except HTTPException:
-                            raise
-                        except Exception as e:
-                            logger.warning(f"RoE time window check failed (proceeding): {e}")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"Could not check RoE time window (proceeding): {e}")
+        _check_roe_time_window(project)
 
     try:
         state = await container_manager.start_recon(
@@ -1109,66 +1249,18 @@ async def start_partial_recon(project_id: str, request: PartialReconStartRequest
     if not container_manager:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    # RoE time window + hard guardrail checks (same as full recon)
+    # RoE time window + hard guardrail checks (same as full recon), fail-closed.
     if request.webapp_api_url:
-        try:
-            import urllib.request
-            import json as json_mod
-            from datetime import datetime
-            try:
-                import zoneinfo
-            except ImportError:
-                from backports import zoneinfo
+        project = _fetch_project_for_preflight(project_id)
 
-            url = f"{_trusted_webapp_base()}/api/projects/{project_id}"
-            req = urllib.request.Request(url)
-            req.add_header("X-Internal-Key", os.environ.get("INTERNAL_API_KEY", ""))
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    project = json_mod.loads(resp.read().decode())
+        domain = request.graph_inputs.get("domain", "")
+        if domain:
+            from hard_guardrail import is_hard_blocked
+            blocked, reason = is_hard_blocked(domain)
+            if blocked:
+                raise HTTPException(status_code=403, detail=f"Hard guardrail: {reason}")
 
-                    # Hard guardrail check
-                    domain = request.graph_inputs.get("domain", "")
-                    if domain:
-                        from hard_guardrail import is_hard_blocked
-                        blocked, reason = is_hard_blocked(domain)
-                        if blocked:
-                            raise HTTPException(status_code=403, detail=f"Hard guardrail: {reason}")
-
-                    # RoE time window check
-                    if project.get('roeEnabled') and project.get('roeTimeWindowEnabled'):
-                        tz_name = project.get('roeTimeWindowTimezone', 'UTC')
-                        try:
-                            tz = zoneinfo.ZoneInfo(tz_name)
-                            now_local = datetime.now(tz)
-                            day_name = now_local.strftime('%A').lower()
-                            allowed_days = project.get('roeTimeWindowDays', [])
-                            start_time = project.get('roeTimeWindowStartTime', '09:00')
-                            end_time = project.get('roeTimeWindowEndTime', '18:00')
-                            current_time = now_local.strftime('%H:%M')
-
-                            if day_name not in allowed_days:
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=f"RoE time window: testing not allowed on {day_name.capitalize()}"
-                                )
-                            if start_time <= end_time:
-                                outside = current_time < start_time or current_time > end_time
-                            else:
-                                outside = current_time < start_time and current_time > end_time
-                            if outside:
-                                raise HTTPException(
-                                    status_code=403,
-                                    detail=f"RoE time window: current time {current_time} {tz_name} outside allowed ({start_time}-{end_time})"
-                                )
-                        except HTTPException:
-                            raise
-                        except Exception as e:
-                            logger.warning(f"RoE check failed (proceeding): {e}")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning(f"Could not check RoE (proceeding): {e}")
+        _check_roe_time_window(project)
 
     # Note: settings are fetched by the recon container itself via get_settings()
     # (uses PROJECT_ID + WEBAPP_API_URL env vars, same as main.py)

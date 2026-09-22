@@ -380,3 +380,78 @@
 .fullWidth {
   grid-column: 1 / -1;
 }
+
+/* --- Engagement authorizations -------------------------------------------- */
+/* The append-only record of what permitted this engagement. A stacked list
+   rather than a table, so it reads at any width: the narrow viewport is the
+   common one on this page and a four-column table there is unreadable. */
+.authList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.authItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+
+/* The most recent record is the authority a run today is covered by. The rest
+   are history, and dimming them says which is which without a legend. */
+.authCurrent {
+  border-color: var(--color-accent, #4a9eff);
+}
+
+.authSuperseded {
+  opacity: 0.72;
+}
+
+.authHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.authProgram {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.authWhen {
+  color: var(--color-text-tertiary);
+  font-size: 0.75rem;
+}
+
+/* A digest is the whole point of the record, so it stays readable rather than
+   being truncated into something nobody can compare. */
+.authDigest {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
+.authMeta {
+  color: var(--color-text-tertiary);
+  font-size: 0.75rem;
+}
+
+.authState {
+  color: var(--color-text-tertiary);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.authWarn {
+  color: var(--color-danger, #d33);
+  font-size: 0.8rem;
+  margin: 0;
+}

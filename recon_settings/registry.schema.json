@@ -1,0 +1,178 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RedAmon recon settings registry",
+  "type": "object",
+  "required": ["version", "tools", "fields", "runtime_only"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "tools": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/tool" }
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/field" }
+    },
+    "runtime_only": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/runtime_key" }
+    }
+  },
+  "definitions": {
+    "tool": {
+      "type": "object",
+      "required": ["title", "phase", "traffic"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "vendor": { "type": ["string", "null"] },
+        "phase": { "$ref": "#/definitions/phase" },
+        "traffic": { "$ref": "#/definitions/traffic" },
+        "image": { "type": ["string", "null"] },
+        "enabled_key": { "type": ["string", "null"] },
+        "module": { "type": ["string", "null"] },
+        "isolated_fn": { "type": ["string", "null"] },
+        "graph_writer": { "type": ["string", "null"] },
+        "partial_recon_module": { "type": ["string", "null"] },
+        "form_section": { "type": ["string", "null"] },
+        "produces": { "type": "array", "items": { "type": "string" } },
+        "description": { "type": "string" },
+        "footguns": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["tool", "runtime_key", "unit", "phase", "traffic", "roe_capped", "mcp", "meaning"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": { "type": "string", "minLength": 1 },
+        "runtime_key": { "type": ["string", "null"] },
+        "unit": { "$ref": "#/definitions/unit" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "traffic": { "$ref": "#/definitions/traffic" },
+        "roe_capped": { "type": "boolean" },
+        "mcp": { "enum": ["settable", "create_only", "never"] },
+        "meaning": { "type": "string", "minLength": 1 },
+        "bounds": {
+          "type": "object",
+          "required": ["min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          }
+        },
+        "values": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "validator": { "$ref": "#/definitions/validator" },
+        "zero_means": { "enum": ["unlimited", "disabled", "auto", "literal"] },
+        "fallback": { "enum": ["missing", "falsy"] },
+        "coerce": { "enum": ["int", "strip", "strip_list"] },
+        "deny_reason": { "$ref": "#/definitions/deny_reason" },
+        "written_by": { "type": "string" },
+        "readable": { "type": "boolean" },
+        "read_deny_reason": { "$ref": "#/definitions/read_deny_reason" },
+        "group": { "type": "string" },
+        "form_section": { "type": ["string", "null"] },
+        "governor": { "$ref": "#/definitions/governor" },
+        "stealth": { "$ref": "#/definitions/stealth" }
+      }
+    },
+    "runtime_key": {
+      "type": "object",
+      "required": ["source", "unit", "roe_capped", "meaning"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "enum": ["internal", "env", "user_account", "project_relation"] },
+        "tool": { "type": "string" },
+        "unit": { "$ref": "#/definitions/unit" },
+        "roe_capped": { "type": "boolean" },
+        "zero_means": { "enum": ["unlimited", "disabled", "auto", "literal"] },
+        "secret": { "type": "boolean" },
+        "governor": { "$ref": "#/definitions/governor" },
+        "stealth": { "$ref": "#/definitions/stealth" },
+        "meaning": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "set": {},
+        "ceiling": { "type": "number" }
+      }
+    },
+    "governor": {
+      "type": "object",
+      "required": ["model", "floor"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "enum": ["ratio", "budget"] },
+        "family": { "enum": ["url", "js_file", "osint_result", "vhost_candidate", "byte"] },
+        "floor": { "type": "number", "minimum": 0 }
+      }
+    },
+    "phase": {
+      "enum": [
+        "domain_discovery",
+        "port_scan",
+        "http_probe",
+        "resource_enum",
+        "vuln_scan",
+        "js_recon",
+        "standalone"
+      ]
+    },
+    "traffic": { "enum": ["none", "passive", "active"] },
+    "unit": {
+      "enum": [
+        "rps",
+        "seconds",
+        "minutes",
+        "milliseconds",
+        "threads",
+        "count",
+        "bytes",
+        "depth",
+        "percent",
+        "ratio",
+        "port",
+        "none"
+      ]
+    },
+    "validator": {
+      "enum": [
+        "docker_image",
+        "http_header",
+        "project_file",
+        "project_file_name",
+        "status_codes",
+        "severity",
+        "scan_modules",
+        "hostname",
+        "url",
+        "port_spec",
+        "free_text",
+        "identifier",
+        "json_object"
+      ]
+    },
+    "read_deny_reason": {
+      "enum": ["credential", "third_party_pii", "document_blob", "other_user"]
+    },
+    "deny_reason": {
+      "enum": [
+        "identity",
+        "internal",
+        "escalation",
+        "secret",
+        "upload-managed",
+        "engagement-record",
+        "not-tuning",
+        "derived"
+      ]
+    }
+  }
+}

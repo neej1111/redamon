@@ -12,8 +12,9 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-from supply_chain_common import intel_sync
+from supply_chain_common import intel_seed, intel_sync
 from supply_chain_common.security import SanitizeError, sanitize_hostname
 
 
@@ -226,6 +227,13 @@ class TestSyncIntel(unittest.TestCase):
     def setUp(self):
         self.out = tempfile.mkdtemp(prefix="sca-intel-test-")
         self.addCleanup(shutil.rmtree, self.out, ignore_errors=True)
+        # These tests pin the feed-failure contract when NO bundled seed is
+        # usable; with one, a cold volume is seeded instead of failing. The seed
+        # path is covered in test_sca_intel_seed.py.
+        patcher = mock.patch.object(intel_seed, "SEED_FILE",
+                                    os.path.join(self.out, "absent-seed.json.gz"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _sync(self, payload, **kw):
         def fetcher(url, timeout=None):

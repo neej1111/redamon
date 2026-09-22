@@ -43,7 +43,7 @@ How to manage input fields from modal:
 ## Critical Rules
 
 - **NEVER duplicate recon code.** Import and call the exact same functions from the existing pipeline modules (`domain_recon.py`, `port_scan.py`, `http_probe.py`, etc.). The partial recon entry point is a thin orchestration layer.
-- **All graph writes use MERGE -- deduplication is automatic.** Every node type has a uniqueness constraint in `graph_db/schema.py` (e.g. IP is unique on `(address, user_id, project_id)`, Port on `(number, protocol, ip_address, user_id, project_id)`). All Cypher writes use `MERGE` matching on these keys -- if the node exists it gets updated, if not it gets created. Never use CREATE for nodes that might already exist. You do NOT need to implement deduplication logic -- it's handled by the schema + MERGE.
+- **All graph writes use MERGE -- deduplication is automatic.** Every node type has a uniqueness constraint declared in `graph_db/schema_keys.py` (e.g. IP is unique on `(address, user_id, project_id)`, Port on `(number, protocol, ip_address, user_id, project_id)`); `graph_db/schema.py` renders the `CREATE CONSTRAINT` statements from it. All Cypher writes use `MERGE` matching on these keys -- if the node exists it gets updated, if not it gets created. Never use CREATE for nodes that might already exist. You do NOT need to implement deduplication logic -- it's handled by the schema + MERGE.
 - **Container-based execution.** Partial recon runs inside the same `redamon-recon` Docker image as the full pipeline, with a different command (`python /app/recon/partial_recon.py`). The orchestrator manages the container lifecycle.
 - **Settings come from `get_settings()`.** The recon container fetches project settings via the webapp API (camelCase to UPPER_SNAKE_CASE conversion). Never pass raw camelCase settings.
 - **Input node types come from `nodeMapping.ts`.** This is the single source of truth for what each tool consumes and produces. The modal reads from this mapping.
@@ -391,7 +391,9 @@ Each tool's settings section has a header with a Toggle switch. Add a "Run parti
 |------|----------|
 | `webapp/src/components/projects/ProjectForm/nodeMapping.ts` | `SECTION_INPUT_MAP` and `SECTION_NODE_MAP` -- tool I/O node types |
 | `webapp/src/components/projects/ProjectForm/WorkflowView/workflowDefinition.ts` | `WORKFLOW_TOOLS` -- tool IDs, labels, groups |
-| `graph_db/schema.py` | Neo4j constraints and indexes |
+| `graph_db/schema_keys.py` | Each label's uniqueness key -- THE declaration |
+| `graph_db/schema.py` | Renders the constraints from it, plus the indexes |
+| `graph_db/schema_sections.md` | Every label, property and relationship -- THE declaration |
 | `recon/project_settings.py` | `get_settings()` + `DEFAULT_SETTINGS` |
 | `recon/main.py` | Full pipeline -- see what `recon_data` structure each tool expects |
 

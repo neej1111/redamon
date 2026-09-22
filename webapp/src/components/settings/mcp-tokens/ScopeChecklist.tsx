@@ -1,0 +1,144 @@
+'use client'
+
+/**
+ * The permission checkboxes, shared by the create form, the edit panel and the
+ * Agent Onboarding modal.
+ *
+ * Grouped rather than flat. A flat list of nine, where reading, scanning and
+ * writing interleave and the one permission that reaches a live target looks
+ * like the eight above it, was readable only by someone who already knew the
+ * model. With a profile now ticking boxes on the operator's behalf, the ticks
+ * have to read as a SHAPE at a glance ("this token reads and scans, nothing
+ * else"), which is what the group headers are for.
+ *
+ * `kali:exec` gets its own panel below a separator, in a third visual tier.
+ * Red is already spent on the `danger` scopes inside the scan and write groups,
+ * so making this louder red would not distinguish it; being a different KIND of
+ * block does.
+ */
+import { ShieldAlert, Terminal } from 'lucide-react'
+import { ExternalLink } from '@/components/ui'
+import type { McpScope } from '@/lib/mcpAuth'
+import { MCP_SCOPE_COPY as SCOPE_COPY, SCOPE_GROUPS } from '@/lib/mcp/scopeCopy'
+import { PROFILES, type ProfileId } from '@/lib/mcp/profiles'
+import styles from './McpTokensTab.module.css'
+
+interface Props {
+  selected: McpScope[]
+  onToggle: (scope: McpScope) => void
+  disabled?: boolean
+  /**
+   * When set, rows that differ from this profile's recommendation carry a quiet
+   * "modified" tag, and the two never-auto-ticked scopes it recommends are
+   * labelled as such while staying unchecked.
+   */
+  profile?: ProfileId | null
+}
+
+export default function ScopeChecklist({ selected, onToggle, disabled = false, profile }: Props) {
+  const meta = profile ? PROFILES[profile] : null
+  const recommended = new Set(meta?.recommendedScopes ?? [])
+  const optIn = new Set(meta?.optInScopes ?? [])
+
+  const rowState = (scope: McpScope) => {
+    const checked = selected.includes(scope)
+    if (!meta) return { checked, tag: null as string | null }
+    if (recommended.has(scope)) {
+      return { checked, tag: checked ? 'from profile' : 'removed' }
+    }
+    if (optIn.has(scope)) {
+      // Recommended for the job, deliberately not ticked for you.
+      return { checked, tag: checked ? 'added' : 'recommended, tick it yourself' }
+    }
+    return { checked, tag: checked ? 'added' : null }
+  }
+
+  const renderRow = (scope: McpScope, tone: 'neutral' | 'action' | 'exec') => {
+    const { checked, tag } = rowState(scope)
+    const copy = SCOPE_COPY[scope]
+    return (
+      <label
+        key={scope}
+        className={[
+          styles.scopeRow,
+          checked ? styles.scopeChecked : '',
+          copy.danger && tone !== 'exec' ? styles.scopeDanger : '',
+          tone === 'exec' ? styles.scopeExecRow : '',
+        ].filter(Boolean).join(' ')}
+      >
+        <input
+          type="checkbox"
+          className={`checkbox ${styles.scopeCheckbox}`}
+          checked={checked}
+          disabled={disabled}
+          onChange={() => onToggle(scope)}
+        />
+        <span className={styles.scopeText}>
+          <span className={styles.scopeTitleRow}>
+            <strong className={styles.scopeLabel}>{copy.label}</strong>
+            <code className={styles.scopeCode}>{scope}</code>
+            {tag && <span className={styles.scopeTag}>{tag}</span>}
+          </span>
+          <span className={styles.scopeBlurb}>{tone === 'exec' ? copy.detail ?? copy.blurb : copy.blurb}</span>
+          {tone === 'exec' && copy.learnMore && (
+            <span className={styles.scopeLinks}>
+              {copy.learnMore.map(link => (
+                <ExternalLink key={link.href} href={link.href} className={styles.scopeLink}>
+                  {link.text}
+                </ExternalLink>
+              ))}
+            </span>
+          )}
+        </span>
+      </label>
+    )
+  }
+
+  return (
+    <fieldset className={styles.scopes} disabled={disabled}>
+      <legend className="formLabel">Permissions</legend>
+
+      {SCOPE_GROUPS.filter(g => g.tone !== 'exec').map(group => (
+        <div key={group.id} className={styles.scopeGroup}>
+          <div className={styles.scopeGroupHeader}>
+            <span className={styles.scopeGroupLabel}>{group.label}</span>
+            <span className={styles.scopeGroupHint}>{group.hint}</span>
+          </div>
+          <div className={styles.scopeList}>
+            {group.scopes.map(s => renderRow(s, group.tone))}
+          </div>
+        </div>
+      ))}
+
+      {SCOPE_GROUPS.filter(g => g.tone === 'exec').map(group => (
+        <div key={group.id} className={styles.scopeExecPanel}>
+          <div className={styles.scopeExecHeader}>
+            <Terminal size={14} />
+            <span className={styles.scopeGroupLabel}>{group.label}</span>
+            <span className={styles.scopeGroupHint}>{group.hint}</span>
+          </div>
+          <div className={styles.scopeList}>
+            {group.scopes.map(s => renderRow(s, 'exec'))}
+          </div>
+        </div>
+      ))}
+
+      {meta && meta.optInScopes.length > 0 && (
+        <p className={styles.scopeFootnote}>
+          <ShieldAlert size={13} />
+          <span>
+            <strong>{meta.label}</strong> also suggests{' '}
+            {meta.optInScopes.map((s, i) => (
+              <span key={s}>
+                {i > 0 && ' and '}
+                <code className={styles.scopeCode}>{s}</code>
+              </span>
+            ))}
+            , but a profile never ticks those for you. Command execution and discarding a graph are
+            deliberate choices, not side effects of picking a job.
+          </span>
+        </p>
+      )}
+    </fieldset>
+  )
+}

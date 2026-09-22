@@ -365,14 +365,19 @@ class TestVhostSniGraphMixin(unittest.TestCase):
             ).single()
             self.assertIsNotNone(rec, "Subdomain was not auto-created")
             self.assertEqual(rec["s"]["source"], "vhost_sni_enum")
+            self.assertIs(
+                rec["s"]["has_dns_records"], False,
+                "a vhost candidate is unconfirmed until a resolver says otherwise",
+            )
 
     # --------------------------------------------------------------------
     # 6b. Newly invented Subdomain is wired into Domain + IP (no orphans)
     # --------------------------------------------------------------------
     def test_new_subdomain_linked_to_parent_domain_and_ip(self):
-        """When vhost_sni invents a Subdomain, it must BELONG_TO the parent
-        Domain and RESOLVE_TO the IP it was discovered on -- otherwise the
-        new node + its Vulnerability become an orphan island in the graph view."""
+        """When vhost_sni invents a Subdomain it must BELONG_TO the parent
+        Domain, or the new node and its Vulnerability become an orphan island in
+        the graph view. It must NOT claim the name resolves to the probed IP:
+        answering a Host header is routing behaviour, not DNS."""
         recon = {
             "domain": "example.com",
             "vhost_sni": {
@@ -418,12 +423,13 @@ class TestVhostSniGraphMixin(unittest.TestCase):
             ).single()["c"]
             self.assertEqual(belongs, 1, "Subdomain not linked BELONGS_TO Domain")
             self.assertEqual(has_sub, 1, "Domain not linked HAS_SUBDOMAIN to Subdomain")
-            self.assertEqual(resolves, 1, "Subdomain not linked RESOLVES_TO IP")
+            self.assertEqual(resolves, 0, "vhost/SNI evidence must not assert DNS resolution")
 
-    def test_subdomain_outside_target_domain_only_links_to_ip(self):
-        """If the discovered hostname does NOT fall under the project's target
-        domain (e.g. a co-hosted third-party vhost), do not force a fake parent
-        link -- but still link to the IP so it isn't a fully-orphan node."""
+    def test_host_outside_target_domain_hangs_off_the_ip(self):
+        """A hostname outside the project's domain (a co-hosted third party) is
+        not ours to add to the inventory, so no Subdomain is invented and no
+        parent link is forced. The finding still has to be reachable, so it
+        hangs off the IP that actually served it."""
         recon = {
             "domain": "example.com",
             "vhost_sni": {
@@ -453,15 +459,178 @@ class TestVhostSniGraphMixin(unittest.TestCase):
                 """,
                 uid=self.uid, pid=self.pid,
             ).single()["c"]
-            resolves = session.run(
+            invented = session.run(
                 """
-                MATCH (s:Subdomain {name: 'unrelated.co.uk', user_id: $uid, project_id: $pid})-[:RESOLVES_TO]->(:IP {address: '1.2.3.4'})
-                RETURN count(*) AS c
+                MATCH (s:Subdomain {name: 'unrelated.co.uk', user_id: $uid, project_id: $pid})
+                RETURN count(s) AS c
+                """,
+                uid=self.uid, pid=self.pid,
+            ).single()["c"]
+            anchored = session.run(
+                """
+                MATCH (:IP {address: '1.2.3.4', user_id: $uid, project_id: $pid})
+                      -[:HAS_VULNERABILITY]->(v:Vulnerability {source: 'vhost_sni_enum'})
+                WHERE v.hostname = 'unrelated.co.uk'
+                RETURN count(v) AS c
                 """,
                 uid=self.uid, pid=self.pid,
             ).single()["c"]
             self.assertEqual(belongs, 0, "Should not invent a Domain link for off-target host")
-            self.assertEqual(resolves, 1, "Off-target host still needs an IP anchor")
+            self.assertEqual(invented, 0, "Should not invent a Subdomain for an off-target host")
+            self.assertEqual(anchored, 1, "Off-target finding still needs an IP anchor")
+
+    # --------------------------------------------------------------------
+    # 6c. A real DNS name probed on someone else's IP
+    # --------------------------------------------------------------------
+    def test_probing_a_resolved_name_on_another_ip_adds_no_dns_edge(self):
+        """The reverse-proxy case that started this: 'admin.example.com' really
+        resolves to 1.2.3.4, and the sweep also finds it answering on the shared
+        frontend 9.9.9.9. Only the resolver's edge may exist afterwards."""
+        with self.client.driver.session() as session:
+            session.run(
+                """
+                MERGE (i:IP {address: '9.9.9.9', user_id: $uid, project_id: $pid})
+                """,
+                uid=self.uid, pid=self.pid,
+            )
+        recon = {
+            "domain": "example.com",
+            "vhost_sni": {
+                "by_ip": {},
+                "findings": [{
+                    "id": "vhost_sni_admin_example_com_9_9_9_9_443_l7",
+                    "name": "Hidden Virtual Host: admin.example.com",
+                    "type": "hidden_vhost",
+                    "severity": "medium",
+                    "source": "vhost_sni_enum",
+                    "hostname": "admin.example.com",
+                    "ip": "9.9.9.9",
+                    "port": 443,
+                    "layer": "L7",
+                    "discovered_at": "2026-04-25T14:00:00Z",
+                }],
+                "discovered_baseurls": [],
+            },
+        }
+        self.client.update_graph_from_vhost_sni(recon, self.uid, self.pid)
+
+        with self.client.driver.session() as session:
+            targets = [r["ip"] for r in session.run(
+                """
+                MATCH (s:Subdomain {name: 'admin.example.com', user_id: $uid, project_id: $pid})
+                      -[:RESOLVES_TO]->(i:IP)
+                RETURN i.address AS ip ORDER BY ip
+                """,
+                uid=self.uid, pid=self.pid,
+            )]
+            self.assertEqual(
+                targets, ["1.2.3.4"],
+                "the probed frontend must not be recorded as a DNS answer",
+            )
+
+    # --------------------------------------------------------------------
+    # 6d. Repairing the edges earlier releases wrote
+    # --------------------------------------------------------------------
+    def test_stale_vhost_edge_is_dropped_but_a_corroborated_one_survives(self):
+        """Pairs this scan probes get the old vhost-authored edge removed. An
+        edge a DNS writer corroborated (it carries record_type) is left alone."""
+        with self.client.driver.session() as session:
+            session.run(
+                """
+                MATCH (s:Subdomain {name: 'orphan.example.com', user_id: $uid, project_id: $pid})
+                MATCH (i:IP {address: '1.2.3.4', user_id: $uid, project_id: $pid})
+                MERGE (s)-[r:RESOLVES_TO]->(i)
+                SET r.discovered_via = 'vhost_sni_enum'
+                WITH 1 AS _
+                MATCH (s2:Subdomain {name: 'admin.example.com', user_id: $uid, project_id: $pid})
+                MATCH (i2:IP {address: '1.2.3.4', user_id: $uid, project_id: $pid})
+                MERGE (s2)-[r2:RESOLVES_TO]->(i2)
+                SET r2.discovered_via = 'vhost_sni_enum', r2.record_type = 'A'
+                """,
+                uid=self.uid, pid=self.pid,
+            )
+
+        def _finding(host, vid):
+            return {
+                "id": vid, "name": f"Hidden Virtual Host: {host}",
+                "type": "hidden_vhost", "severity": "info", "source": "vhost_sni_enum",
+                "hostname": host, "ip": "1.2.3.4", "port": 443, "layer": "L7",
+                "discovered_at": "2026-04-25T14:00:00Z",
+            }
+
+        stats = self.client.update_graph_from_vhost_sni({
+            "domain": "example.com",
+            "vhost_sni": {
+                "by_ip": {},
+                "findings": [
+                    _finding("orphan.example.com", "vhost_sni_orphan_1_2_3_4_443_l7"),
+                    _finding("admin.example.com", "vhost_sni_admin_1_2_3_4_443_l7"),
+                ],
+                "discovered_baseurls": [],
+            },
+        }, self.uid, self.pid)
+
+        with self.client.driver.session() as session:
+            stale = session.run(
+                """
+                MATCH (s:Subdomain {name: 'orphan.example.com', user_id: $uid, project_id: $pid})
+                      -[r:RESOLVES_TO]->(:IP {address: '1.2.3.4'})
+                RETURN count(r) AS c
+                """,
+                uid=self.uid, pid=self.pid,
+            ).single()["c"]
+            kept = session.run(
+                """
+                MATCH (s:Subdomain {name: 'admin.example.com', user_id: $uid, project_id: $pid})
+                      -[r:RESOLVES_TO]->(:IP {address: '1.2.3.4'})
+                RETURN count(r) AS c
+                """,
+                uid=self.uid, pid=self.pid,
+            ).single()["c"]
+            self.assertEqual(stale, 0, "the edge only vhost/SNI ever wrote should be gone")
+            self.assertEqual(kept, 1, "a DNS-corroborated edge must not be collateral")
+            self.assertEqual(stats["stale_dns_edges_removed"], 1)
+
+    # --------------------------------------------------------------------
+    # 6e. The query the schema documents for this tool
+    # --------------------------------------------------------------------
+    def test_documented_hidden_admin_panel_query_returns_the_finding(self):
+        """schema_sections.md tells the agent to reach these findings through
+        the Subdomain. A hidden panel is never in DNS, so if that traversal
+        breaks, the agent goes blind exactly where the tool earns its keep."""
+        recon = {
+            "domain": "example.com",
+            "vhost_sni": {
+                "by_ip": {},
+                "findings": [{
+                    "id": "vhost_sni_jenkins_example_com_1_2_3_4_443_l7",
+                    "name": "Hidden Virtual Host: jenkins.example.com",
+                    "type": "hidden_vhost",
+                    "severity": "medium",
+                    "source": "vhost_sni_enum",
+                    "hostname": "jenkins.example.com",
+                    "ip": "1.2.3.4",
+                    "port": 443,
+                    "layer": "L7",
+                    "internal_pattern_match": "jenkins",
+                    "discovered_at": "2026-04-25T14:00:00Z",
+                }],
+                "discovered_baseurls": [],
+            },
+        }
+        self.client.update_graph_from_vhost_sni(recon, self.uid, self.pid)
+
+        with self.client.driver.session() as session:
+            rows = [r["hostname"] for r in session.run(
+                """
+                MATCH (s:Subdomain {user_id: $uid, project_id: $pid})
+                      -[:HAS_VULNERABILITY]->(v:Vulnerability {source: 'vhost_sni_enum'})
+                WHERE v.internal_pattern_match IS NOT NULL
+                RETURN s.name AS hostname
+                """,
+                uid=self.uid, pid=self.pid,
+            )]
+            self.assertIn("jenkins.example.com", rows)
 
     # --------------------------------------------------------------------
     # 7. Empty input is a no-op

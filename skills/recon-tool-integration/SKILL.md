@@ -56,6 +56,34 @@ For the graph write, use `graph-db-writes`. For the settings, use
   the correct execution group in [recon/main.py](../../recon/main.py); never
   parallelize across a dependency boundary (a tool needing live URLs cannot run
   before GROUP 4).
+- **A new tool setting FAILS THE BUILD until it is in the registry.** Every
+  parameter is described once in
+  [recon_settings/registry.yaml](../../recon_settings/registry.yaml),
+  and a test walking `Prisma.ProjectScalarFieldEnum` fails until every column
+  has an entry. Draft it with
+  `python3 tooling/scripts/extract_recon_registry.py`, EDIT IT, then
+  `python3 recon_settings/build.py`.
+- **Tuning is OPEN and controlled at the point of use, not by being refused.**
+  A rate is capped to the engagement ceiling at scan start; a wordlist path
+  outside the project's own directories is dropped. A container image is a
+  closed `values:` list and an out-of-set value is REFUSED at the write, because
+  accepting one and replacing it at scan start made `get_recon_settings` echo an
+  image the scan would never run.
+- **Two things stay closed, and only two.** The engagement SCOPE
+  (`mcp: create_only`, set once by `create_project`) and the engagement RECORD
+  (`mcp: never`, `deny_reason: engagement-record` - the client, the contacts,
+  the dates, the document). The engagement's LIMITS are ordinary `mcp: settable`
+  fields in the `engagement_limits` group: they are reachable from the form and
+  from MCP alike, and what makes them safe is that each is enforced at scan
+  start whatever the setting says. See
+  [README.MCP.SERVER.md](../../docs/readmes/README.MCP.SERVER.md).
+- **A settable field with no form input fails `parity.test.ts`, and so does a
+  form input with no classification.** Neither door may reach something the
+  other cannot. `form_section` is joined from the tool's own entry, so a field
+  lands beside its tool automatically.
+- **A new `rps` field with `traffic: active` and no `roe_capped: true` fails the
+  build.** That gap is how three rate limits shipped reachable over MCP and
+  outside the ceiling.
 
 ---
 

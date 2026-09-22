@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # firewall.sh -- ufw as the portable host firewall (§10).
-# Reads (exported by deploy.sh): ENABLE_UFW, HTTP_PORT, HTTPS_PORT, SSH_PORT,
+# Reads (exported by deploy.sh): MCP_SERVER_ENABLED, MCP_CLIENT_CIDRS, ENABLE_UFW, HTTP_PORT, HTTPS_PORT, SSH_PORT,
 #   SSH_ALLOW_CIDRS (falls back to OPERATOR_ALLOW_CIDRS), OPERATOR_ALLOW_CIDRS,
 #   ACCESS_MODE, REVSHELL_TARGET_CIDRS.
 # Requires _common.sh.
@@ -8,6 +8,25 @@
 # Docker-bypass caveat: Docker publishes ports via its own iptables chains and can
 # bypass ufw. The loopback re-binds in the prod overlay are the REAL control for
 # 3000/8090/4444; ufw here is belt-and-braces + the SSH lockdown.
+
+# Admit the MCP client CIDRs to the app port, on top of the operator CIDRs.
+#
+# The firewall cannot filter by URL path, so this necessarily opens the PORT to
+# those sources. The path-level narrowing is nginx's job: the exact-match
+# `location = /api/mcp-server` re-states its own allow/deny, so an MCP client
+# CIDR reaches the MCP endpoint and nothing else. Without this, ufw drops the
+# agent's packet before nginx ever sees the path, and MCP_EDGE_ALLOW_BEARER is
+# necessary but not sufficient.
+#
+# Only meaningful when OPERATOR_ALLOW_CIDRS is set; with no operator list the
+# port is already world-open and there is nothing extra to admit.
+_allow_mcp_clients() {
+  local port="$1"
+  is_true "${MCP_SERVER_ENABLED:-false}" || return 0
+  [[ -n "${MCP_CLIENT_CIDRS:-}" ]] || return 0
+  info "MCP client CIDRs also allowed on ${port}: ${MCP_CLIENT_CIDRS} (nginx narrows them to /api/mcp-server)"
+  _ufw_allow_sources "${MCP_CLIENT_CIDRS}" "${port}" tcp
+}
 
 _ufw_allow_sources() {
   # $1 = comma-list of CIDRs, $2 = port, $3 = proto
@@ -56,6 +75,7 @@ setup_firewall() {
     if [[ -n "${OPERATOR_ALLOW_CIDRS:-}" ]]; then
       info "HTTP app (${http_port}) restricted to operator CIDRs: ${OPERATOR_ALLOW_CIDRS}"
       _ufw_allow_sources "${OPERATOR_ALLOW_CIDRS}" "${http_port}" tcp
+      _allow_mcp_clients "${http_port}"
     else
       warn "No OPERATOR_ALLOW_CIDRS -- opening HTTP app (${http_port}) to the world (nginx gate is the only brake)"
       run_sudo ufw allow "${http_port}/tcp"
@@ -68,6 +88,7 @@ setup_firewall() {
     if [[ -n "${OPERATOR_ALLOW_CIDRS:-}" ]]; then
       info "HTTPS (${https_port}) restricted to operator CIDRs: ${OPERATOR_ALLOW_CIDRS}"
       _ufw_allow_sources "${OPERATOR_ALLOW_CIDRS}" "${https_port}" tcp
+      _allow_mcp_clients "${https_port}"
     else
       warn "No OPERATOR_ALLOW_CIDRS -- opening HTTPS (${https_port}) to the world (nginx gate is the only brake)"
       run_sudo ufw allow "${https_port}/tcp"

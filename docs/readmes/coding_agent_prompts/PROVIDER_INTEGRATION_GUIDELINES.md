@@ -110,6 +110,7 @@ A new provider is fully integrated when **every one** of the following works wit
 - [ ] AI-generated preset (`/api/presets/generate`) uses your provider.
 - [ ] Pentest report summarizer (`/api/report/summarize`) uses your provider.
 - [ ] Text-to-Cypher (graph view "ask the graph" + redagraph MCP tool) uses your provider.
+- [ ] The **inbound** MCP server's `query_graph` answers on a project whose model points at your provider. Mint a token in Global Settings -> MCP Server with `recon:read`, then call `query_graph` with a `question` (not a `cypher`). Same `/graph/nl-query` -> `_build_cypher_manager` -> `setup_llm` path as "ask the graph", so an unrecognised prefix in `parse_model_provider` breaks it for **every external agent at once** - and they are told `Could not turn that question into a query. Try rephrasing it.`, which sends them rewriting a question that was never the problem.
 - [ ] CypherFix Triage + CodeFix WebSocket orchestrators use your provider when `cypherfixLlmModel` (or fallback `agentOpenaiModel`) points at it.
 - [ ] Tradecraft URL verifier (`/tradecraft/verify`) uses your provider.
 
@@ -249,6 +250,15 @@ If your provider is **not** OpenAI-compatible (rare - only Anthropic and Bedrock
 ### 4.5 Prisma schema (only if your provider needs new columns)
 
 **File:** [webapp/prisma/schema.prisma](../../../webapp/prisma/schema.prisma) (`UserLlmProvider` model at lines 31-62)
+
+> Columns added here are on `UserLlmProvider`, **not** on `Project`, so they need
+> no entry in `recon_settings/registry.yaml` and the registry build will not fire.
+> That build compares against `Prisma.ProjectScalarFieldEnum` only. The
+> project-level model pointers that *do* live on `Project` (`aiPipelineModel`,
+> `agentOpenaiModel`) are already described there, as ordinary settable fields in
+> the `llm` group — they choose a model, which is tuning, not a credential. The
+> credentials themselves never become `Project` columns, which is the boundary
+> that matters.
 
 The schema already has all common fields:
 
@@ -446,6 +456,8 @@ A common failure mode: `ModelPicker` shows your model under group "My Provider",
 **None of these contain LLM calls.** Redagraph is the only one that triggers LLM behavior, and it does so by HTTP-calling agent's `/text-to-cypher` - which you already updated in [§4.9](#49-agentic---propagate-the-new-api-key-kwarg-into-every-call-site) row 5.
 
 To verify after deploy: open the graph view, click "Ask the graph", switch the model to one of your provider's models in the project settings, and confirm a natural-language query produces a Cypher result.
+
+**The INBOUND MCP server is a second consumer of that same path, and it is not in the file list above.** `mcp/servers/` is RedAmon as an MCP *client*; `webapp/src/lib/mcp/` + `/api/mcp-server` is RedAmon as an MCP *server*, where a third-party agent connects in with a personal access token. Its `query_graph` tool routes a `question` argument through the identical `/graph/nl-query` -> `_build_cypher_manager` -> `setup_llm` chain, so it needs no code change here either - but it is the surface where a routing miss is least visible, because the external agent sees only "try rephrasing" and has no way to reach your logs. The LLM spend is billed against the token owner's key and bounded per token. Verify it with the acceptance-criteria item in [§2](#2-what-fully-integrated-means-acceptance-criteria).
 
 ---
 

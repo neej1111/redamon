@@ -69,8 +69,8 @@ interface GraphToolbarProps {
   onToggleOtherScansModal?: () => void
   // Stealth mode
   stealthMode?: boolean
-  // RoE
-  roeEnabled?: boolean
+  /** Whether the engagement's limits are live. DERIVED by the caller. */
+  engagementLimitsActive?: boolean
   // Emergency Pause All
   onEmergencyPauseAll?: () => void
   isAnyPipelineRunning?: boolean
@@ -153,8 +153,7 @@ export function GraphToolbar({
   onToggleOtherScansModal,
   // Stealth mode
   stealthMode = false,
-  // RoE
-  roeEnabled = false,
+  engagementLimitsActive = false,
   // Emergency Pause All
   onEmergencyPauseAll,
   isAnyPipelineRunning = false,
@@ -236,12 +235,15 @@ export function GraphToolbar({
         </>
       )}
 
-      {roeEnabled && (
+      {engagementLimitsActive && (
         <>
           <div className={styles.divider} />
-          <div className={styles.roeBadge} title="Rules of Engagement are active - guardrails enforced on recon and agent">
+          <div
+            className={styles.roeBadge}
+            title="Engagement limits are active - a rate ceiling, an excluded-host list or a scanning window is set, and each is enforced at scan start"
+          >
             <Shield size={12} />
-            <span>RoE</span>
+            <span>Limits</span>
           </div>
         </>
       )}

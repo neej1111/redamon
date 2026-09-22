@@ -10,6 +10,19 @@ import logging
 import re
 from typing import Any, Optional
 
+# The settings registry: every parameter's bound, unit, and engagement cap.
+# Imported two ways because this module is loaded both as `recon.project_settings`
+# (tests, the agent) and as `project_settings` with /app/recon on the path (a
+# spawned scan container). It is deliberately NOT wrapped in a try/except that
+# falls back: a scan with no registry has no engagement ceiling, so the import
+# failing must stop the scan rather than quietly widen it.
+try:
+    from recon import settings_registry as _registry
+except ImportError:  # pragma: no cover - the container's own layout
+    import settings_registry as _registry
+
+from recon_settings.engagement import derive_roe_enabled
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -890,6 +903,192 @@ def sanitize_image_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+def apply_roe_rate_cap(settings: dict[str, Any]) -> dict[str, Any]:
+    """Cap every rate the engagement ceiling applies to. Mutates and returns.
+
+    The key list and the zero-handling set are both REGISTRY QUERIES. They used
+    to be two hardcoded lists in this function, and the gap between them was a
+    live control failure in three directions at once:
+
+      * `TAKEOVER_RATE_LIMIT` and `JSLUICE_VERIFY_RATE_LIMIT` were settable over
+        MCP and in neither list, so a token holding only `recon:settings` could
+        run 500 and 1000 rps against a project whose operator had set 3.
+      * `PUREDNS_RATE_LIMIT` WAS in the cap list, which made it look covered.
+        Its default is 0, 0 means unlimited, and `0 > 3` is False, so it ran
+        unlimited. Being in the list is not the same as being capped.
+      * `WEB_CACHE_POISON_MAX_RPS_PER_HOST` has the same 0-means-unlimited
+        default and was in neither list.
+
+    Deriving both from `roe_capped` and `zero_means` closes all three, and the
+    registry's own tests make it impossible to add a fourth: an active `rps`
+    field that is not `roe_capped` fails the build.
+    """
+    roe_max_rps = settings.get('ROE_GLOBAL_MAX_RPS', 0)
+    if not settings.get('ROE_ENABLED', False) or not roe_max_rps or roe_max_rps <= 0:
+        return settings
+
+    unlimited_at_zero = _registry.unlimited_zero_runtime_keys()
+    for key in _registry.roe_capped_runtime_keys():
+        value = settings.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if value == 0 and key in unlimited_at_zero:
+            logger.info(f"RoE: capping {key} from unlimited (0) to {roe_max_rps} rps")
+            settings[key] = roe_max_rps
+        elif value > roe_max_rps:
+            logger.info(f"RoE: capping {key} from {value} to {roe_max_rps} rps")
+            settings[key] = roe_max_rps
+    return settings
+
+
+# Roots a path-valued setting may resolve inside. Everything else is dropped to
+# the shipped default at scan start.
+#
+# Why this matters more than a file read: ffuf sends each wordlist LINE as a URL
+# path and records which ones responded, so a wordlist pointed at a file inside
+# the scan container gets its contents reflected into the graph and the scan
+# output. That is exfiltration, not just disclosure. The same shape applies to
+# any tool that reads a list and reports what matched.
+#
+# Until the registry work these columns were simply refused by name on the MCP
+# surface, and there was no check at all on the recon side. The deny list WAS the
+# control; this is what replaces it.
+# The one shared root that also holds per-project uploads, at
+# `<root>/<project_id>/<name>`. Every OTHER root holds only shipped or
+# operator-mounted files, which every project may read.
+_PROJECT_UPLOAD_ROOT = "/app/recon/wordlists"
+
+_PROJECT_FILE_ROOTS = (
+    "/app/recon/wordlists",      # shipped lists + the per-project upload dir
+    "/app/custom_templates",     # operator-supplied nuclei templates
+    "/custom-templates",         # the same directory as the scan container sees it
+    "/usr/share/seclists",       # shipped system wordlists (the ffuf default)
+    "/usr/share/wordlists",
+    "/usr/share/dirb",
+    "/usr/share/dirbuster",
+)
+
+
+def _inside_allowed_root(raw: Any, project_id: str = "") -> bool:
+    """True when `raw` is an absolute path this project may read.
+
+    Fail closed: a value that is not a string, is empty, or cannot be resolved
+    counts as escaping. `os.path.realpath` is used rather than `abspath` so a
+    symlink planted inside an allowed root cannot point out of it.
+
+    The upload root is SHARED between projects, so "inside an allowed root" is
+    not the same question as "this project may read it". Uploads land at
+    `<upload root>/<project id>/<name>`, and the tools that read these files
+    report what matched, so pointing one at a neighbouring project's directory
+    reflects that project's uploaded file into this scan's graph. Inside the
+    upload root a path is therefore allowed only when it is a shipped list
+    sitting directly in it, or when it is under THIS project's directory.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        resolved = os.path.realpath(raw.strip())
+    except (OSError, ValueError):
+        return False
+    upload_root = os.path.realpath(_PROJECT_UPLOAD_ROOT)
+    for root in _PROJECT_FILE_ROOTS:
+        real_root = os.path.realpath(root)
+        if resolved == real_root:
+            return True
+        if not resolved.startswith(real_root + os.sep):
+            continue
+        if real_root != upload_root:
+            return True
+        relative = resolved[len(real_root) + 1:]
+        if os.sep not in relative:
+            return True  # a shipped list, not an upload
+        return bool(project_id) and relative.split(os.sep, 1)[0] == project_id
+    return False
+
+
+def _is_safe_basename(raw: Any) -> bool:
+    """True when `raw` is a plain filename the scan can join onto a directory."""
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    name = raw.strip()
+    if "\0" in name or "/" in name or "\\" in name:
+        return False
+    if name in (".", "..") or name.startswith("."):
+        return False
+    return os.path.basename(name) == name
+
+
+def sanitize_project_file_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Drop every path-valued setting that escapes its allowed directory.
+
+    Mirrors `sanitize_image_settings`: the column is OPEN and the runtime is the
+    control, so an escaping value is replaced with the shipped default and a
+    `[guardrail]` line records it rather than the scan failing. The MCP write
+    path rejects the same values outright; this is the authoritative half,
+    because a row can also be written through the webapp, an import, or a
+    restore.
+
+    Both validators come from the registry, so a new path-valued column is
+    covered the moment it declares one.
+    """
+    # The upload directory is shared, so "allowed" is a per-project question.
+    # An empty id means we could not establish whose scan this is, and then no
+    # upload directory is readable at all.
+    project_id = str(settings.get('PROJECT_ID') or '').strip()
+    for key in _registry.project_file_runtime_keys():
+        if key not in settings:
+            continue
+        value = settings[key]
+        shipped = DEFAULT_SETTINGS.get(key)
+        if isinstance(value, list):
+            kept = [v for v in value if _inside_allowed_root(v, project_id)]
+            if len(kept) != len(value):
+                dropped = [v for v in value if v not in kept]
+                logger.warning(
+                    f"[guardrail] Rejected path(s) outside the allowed directories for "
+                    f"{key}: {dropped} -> dropped"
+                )
+                print(
+                    f"[guardrail] Rejected path(s) outside the allowed directories for "
+                    f"{key}: {dropped} -> dropped",
+                    flush=True,
+                )
+                settings[key] = kept
+            continue
+        # An empty string is "not set", which every consumer already handles.
+        if value in (None, "") or _inside_allowed_root(value, project_id):
+            continue
+        logger.warning(
+            f"[guardrail] Rejected path outside the allowed directories for {key}: "
+            f"{value!r} -> pinned to {shipped!r}"
+        )
+        print(
+            f"[guardrail] Rejected path outside the allowed directories for {key}: "
+            f"{value!r} -> pinned to {shipped!r}",
+            flush=True,
+        )
+        settings[key] = shipped
+
+    for key in _registry.project_file_name_runtime_keys():
+        if key not in settings:
+            continue
+        value = settings[key]
+        if not isinstance(value, list):
+            continue
+        kept = [v for v in value if _is_safe_basename(v)]
+        if len(kept) != len(value):
+            dropped = [v for v in value if v not in kept]
+            logger.warning(
+                f"[guardrail] Rejected non-filename entr(ies) for {key}: {dropped} -> dropped"
+            )
+            print(
+                f"[guardrail] Rejected non-filename entr(ies) for {key}: {dropped} -> dropped",
+                flush=True,
+            )
+            settings[key] = kept
+    return settings
+
+
 def _fetch_user_api_key(user_id: str, webapp_url: str, key_name: str) -> str:
     """Fetch an unmasked API key from user's global settings."""
     import requests as _req
@@ -1685,8 +1884,11 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
         settings['UNCOVER_ONYPHE_API_KEY'] = user_global.get('onypheApiKey', '')
         settings['UNCOVER_DRIFTNET_API_KEY'] = user_global.get('driftnetApiKey', '')
 
-    # Rules of Engagement
-    settings['ROE_ENABLED'] = project.get('roeEnabled', DEFAULT_SETTINGS['ROE_ENABLED'])
+    # Engagement limits. ROE_ENABLED is DERIVED, never read from the column:
+    # a writable master switch would silently disable the ceiling, the
+    # exclusions and the window at once. recon_settings.engagement is the one
+    # implementation the agent and the orchestrator also call.
+    settings['ROE_ENABLED'] = derive_roe_enabled(project)
     settings['ROE_EXCLUDED_HOSTS'] = project.get('roeExcludedHosts', DEFAULT_SETTINGS['ROE_EXCLUDED_HOSTS'])
     settings['ROE_TIME_WINDOW_ENABLED'] = project.get('roeTimeWindowEnabled', DEFAULT_SETTINGS['ROE_TIME_WINDOW_ENABLED'])
     settings['ROE_TIME_WINDOW_TIMEZONE'] = project.get('roeTimeWindowTimezone', DEFAULT_SETTINGS['ROE_TIME_WINDOW_TIMEZONE'])
@@ -1751,33 +1953,16 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['WEB_CACHE_POISON_BEHAVIORAL_DELAY'] = project.get('webCachePoisonBehavioralDelay', DEFAULT_SETTINGS['WEB_CACHE_POISON_BEHAVIORAL_DELAY'])
     settings['WEB_CACHE_POISON_DIFFERENTIAL'] = project.get('webCachePoisonDifferential', DEFAULT_SETTINGS['WEB_CACHE_POISON_DIFFERENTIAL'])
 
-    # RoE: cap all rate limits to the global max if set
-    roe_max_rps = settings['ROE_GLOBAL_MAX_RPS']
-    if settings.get('ROE_ENABLED', False) and roe_max_rps > 0:
-        RATE_LIMIT_KEYS = [
-            'NAABU_RATE_LIMIT', 'MASSCAN_RATE', 'HTTPX_RATE_LIMIT', 'NUCLEI_RATE_LIMIT',
-            'KATANA_RATE_LIMIT', 'GAU_VERIFY_RATE_LIMIT', 'GAU_METHOD_DETECT_RATE_LIMIT',
-            'KITERUNNER_RATE_LIMIT', 'KITERUNNER_METHOD_DETECT_RATE_LIMIT',
-            'FFUF_RATE', 'ARJUN_RATE_LIMIT',
-            'PUREDNS_RATE_LIMIT',
-            'HAKRAWLER_THREADS',
-            'GRAPHQL_RATE_LIMIT',
-            'ORIGIN_DISCOVERY_RATE',
-        ]
-        for key in RATE_LIMIT_KEYS:
-            if key not in settings:
-                continue
-            # These use 0 to mean "unlimited" — must be capped under RoE
-            if settings[key] == 0 and key in ('FFUF_RATE', 'ARJUN_RATE_LIMIT', 'ORIGIN_DISCOVERY_RATE'):
-                logger.info(f"RoE: capping {key} from unlimited (0) to {roe_max_rps} rps")
-                settings[key] = roe_max_rps
-            elif settings[key] > roe_max_rps:
-                logger.info(f"RoE: capping {key} from {settings[key]} to {roe_max_rps} rps")
-                settings[key] = roe_max_rps
+    # RoE: cap every rate the engagement ceiling applies to.
+    apply_roe_rate_cap(settings)
 
     # V3: reject any attacker-influenced tool Docker image before it can reach
     # `docker run` on the host daemon.
     sanitize_image_settings(settings)
+
+    # The same shape for path-valued settings, which reach a tool that reads the
+    # file and reports what matched.
+    sanitize_project_file_settings(settings)
 
     logger.info(f"Loaded {len(settings)} settings for project {project_id}")
     return settings
@@ -1792,46 +1977,20 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
 # governor tightens further under live memory pressure. Fail-open on any error.
 # =============================================================================
 
-# Concurrency / thread / worker / parallelism keys -> RATIO model, floor.
-_GOV_RATIO_KEYS = {
-    'DNS_MAX_WORKERS': 1, 'NAABU_THREADS': 1, 'NMAP_PARALLELISM': 1,
-    'HTTPX_THREADS': 1, 'BANNER_GRAB_THREADS': 1, 'NUCLEI_CONCURRENCY': 1,
-    'NUCLEI_BULK_SIZE': 1, 'SECURITY_CHECK_MAX_WORKERS': 1, 'SUBJACK_THREADS': 1,
-    'VHOST_SNI_CONCURRENCY': 1, 'AI_SURFACE_RECON_MAX_WORKERS': 1,
-    'KATANA_PARALLELISM': 1, 'KATANA_CONCURRENCY': 1, 'ZAP_AJAX_SPIDER_PARALLELISM': 1,
-    'ZAP_AJAX_SPIDER_NUMBER_OF_BROWSERS': 1,  # each = a headless Firefox (~300-500MB)
-    'GAU_WORKERS': 1, 'GAU_THREADS': 1, 'GAU_VERIFY_THREADS': 1,
-    'GAU_METHOD_DETECT_THREADS': 1, 'HAKRAWLER_PARALLELISM': 1, 'HAKRAWLER_THREADS': 1,
-    'JSLUICE_PARALLELISM': 1, 'JSLUICE_CONCURRENCY': 1, 'JSLUICE_VERIFY_THREADS': 1,
-    'JS_RECON_CONCURRENCY': 1, 'JS_RECON_ENDPOINT_CONCURRENCY': 1,
-    'FFUF_THREADS': 1, 'FFUF_PARALLELISM': 1, 'ARJUN_THREADS': 1,
-    'PARAMSPIDER_WORKERS': 1, 'KITERUNNER_THREADS': 1, 'KITERUNNER_PARALLELISM': 1,
-    'KITERUNNER_METHOD_DETECT_THREADS': 1, 'KITERUNNER_CONNECTIONS': 1,
-    'GRAPHQL_CONCURRENCY': 1,
-    'WEB_CACHE_POISON_CONCURRENCY': 1, 'WEB_CACHE_POISON_CONFIRM_WORKERS': 1,
-    'SHODAN_WORKERS': 1, 'OTX_WORKERS': 1, 'VIRUSTOTAL_WORKERS': 1,
-    'CENSYS_WORKERS': 1, 'CRIMINALIP_WORKERS': 1, 'FOFA_WORKERS': 1,
-    'NETLAS_WORKERS': 1, 'ZOOMEYE_WORKERS': 1,
-}
+# The two governor tables are REGISTRY QUERIES. Neither is derivable from a
+# field's unit: only 45 of the model's thread-shaped fields are ratio-scaled and
+# only 20 of its count-shaped ones are byte-budgeted, and a budgeted key also
+# carries a bytes-per-unit FAMILY and a floor that were chosen per key. So the
+# registry records the tables and this reads them, which keeps the lists in the
+# same place as every other fact about a parameter.
 
-# In-memory accumulators -> BYTE-BUDGET model: key -> (bytes-per-unit family, floor).
-_GOV_BUDGET_KEYS = {
-    'KATANA_MAX_URLS': ('url', 1000), 'GAU_MAX_URLS': ('url', 1000),
-    'HAKRAWLER_MAX_URLS': ('url', 1000), 'ZAP_AJAX_SPIDER_MAX_URLS': ('url', 100),
-    'ARJUN_MAX_ENDPOINTS': ('url', 100),
-    'JS_RECON_MAX_FILES': ('js_file', 50), 'JSLUICE_MAX_FILES': ('js_file', 50),
-    'SUPPLY_CHAIN_IMPORT_MAX_FILES': ('js_file', 20),
-    # A byte cap, not a count: per-unit 1 makes scaled_cap treat the value as
-    # bytes directly. Floor 4 MB so import mining still sees a useful sample on
-    # a starved host instead of being throttled to nothing.
-    'SUPPLY_CHAIN_IMPORT_MAX_BYTES': ('byte', 4 * 1024 * 1024),
-    'VHOST_SNI_MAX_CANDIDATES_PER_IP': ('vhost_candidate', 50),
-    'URLSCAN_MAX_RESULTS': ('osint_result', 100), 'FOFA_MAX_RESULTS': ('osint_result', 100),
-    'NETLAS_MAX_RESULTS': ('osint_result', 100), 'ZOOMEYE_MAX_RESULTS': ('osint_result', 100),
-    'UNCOVER_MAX_RESULTS': ('osint_result', 100), 'CRTSH_MAX_RESULTS': ('osint_result', 100),
-    'HACKERTARGET_MAX_RESULTS': ('osint_result', 100), 'KNOCKPY_RECON_MAX_RESULTS': ('osint_result', 100),
-    'SUBFINDER_MAX_RESULTS': ('osint_result', 100), 'AMASS_MAX_RESULTS': ('osint_result', 100),
-}
+
+def _gov_ratio_keys() -> dict[str, int]:
+    return _registry.governor_ratio_keys()
+
+
+def _gov_budget_keys() -> dict[str, tuple[str, int]]:
+    return _registry.governor_budget_keys()
 
 
 def apply_memory_governor(settings: dict[str, Any]) -> dict[str, Any]:
@@ -1849,7 +2008,7 @@ def apply_memory_governor(settings: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         return settings
 
-    for key, floor in _GOV_RATIO_KEYS.items():
+    for key, floor in _gov_ratio_keys().items():
         val = settings.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and val > 0:
             try:
@@ -1861,7 +2020,7 @@ def apply_memory_governor(settings: dict[str, Any]) -> dict[str, Any]:
                 rg.log_cap(tool, key, val, eff, 'ratio')
                 settings[key] = eff
 
-    for key, (family, floor) in _GOV_BUDGET_KEYS.items():
+    for key, (family, floor) in _gov_budget_keys().items():
         val = settings.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and val > 0:
             try:
@@ -1949,214 +2108,59 @@ def reload_settings() -> dict[str, Any]:
 
 def apply_stealth_overrides(settings: dict[str, Any]) -> dict[str, Any]:
     """
-    Apply stealth mode overrides to all recon tool settings.
+    Apply stealth mode overrides to every recon tool.
 
-    When STEALTH_MODE is True, forces all tools to use passive/low-noise
-    techniques. Noisy tools (Kiterunner, banner grabbing) are disabled entirely.
+    When STEALTH_MODE is on, tools are forced to passive, low-noise settings and
+    the noisiest ones are switched off entirely.
 
-    Args:
-        settings: The full settings dictionary
+    The profile is a REGISTRY QUERY. It used to be 105 explicit assignments in
+    this function, which is a list of tools kept in step with the pipeline by
+    hand: a tool added without a stealth entry is simply as loud in stealth mode
+    as it is normally, and nothing anywhere says so. Recording it beside every
+    other fact about a parameter is what makes that visible.
 
-    Returns:
-        Modified settings dictionary with stealth overrides applied
+    Two operations, and the difference is load-bearing:
+
+      set       force this value. Stealth wins whatever the operator chose.
+      ceiling   lower to at most N, leaving an already-quieter value alone. An
+                operator who asked for 50 results keeps 50 rather than being
+                raised to the stealth figure.
+
+    One override stays hand-written below, because it is neither: the nuclei
+    exclude-tag list is a UNION of the operator's own excluded tags with the
+    stealth set, and expressing a union as a value would discard their choice.
+
+    Applied BEFORE the RoE capper and the memory governor, so a low-resource
+    profile wins first and the later passes only tighten further.
     """
     if not settings.get('STEALTH_MODE', False):
         return settings
 
     logger.info("STEALTH MODE ENABLED — applying passive/low-noise overrides to all recon tools")
 
-    # --- Naabu Port Scanner: passive mode only ---
-    settings['NAABU_PASSIVE_MODE'] = True
-    settings['NAABU_RATE_LIMIT'] = 10
-    settings['NAABU_THREADS'] = 1
-    settings['NAABU_SCAN_TYPE'] = 'c'  # CONNECT scan (no raw SYN)
-    settings['NAABU_SKIP_HOST_DISCOVERY'] = True
+    for key, rule in _registry.stealth_profile().items():
+        if key not in settings:
+            continue
+        if 'set' in rule:
+            settings[key] = rule['set']
+            continue
+        ceiling = rule.get('ceiling')
+        current = settings.get(key)
+        if isinstance(current, (int, float)) and not isinstance(current, bool):
+            settings[key] = min(current, ceiling)
+        else:
+            # A non-numeric where a ceiling was declared: fall back to the
+            # ceiling rather than leaving a value stealth was meant to bound.
+            settings[key] = ceiling
 
-    # --- httpx HTTP Probing: low-rate, disable fingerprinting ---
-    settings['HTTPX_THREADS'] = 1
-    settings['HTTPX_RATE_LIMIT'] = 2
-    settings['HTTPX_PROBE_JARM'] = False      # JARM = 10 TLS connections per target
-    settings['HTTPX_PROBE_FAVICON'] = False    # Extra HTTP requests for hashing
-
-    # --- Katana Web Crawler: minimal crawl ---
-    settings['KATANA_DEPTH'] = 1
-    settings['KATANA_RATE_LIMIT'] = 2
-    settings['KATANA_MAX_URLS'] = 50
-    settings['KATANA_JS_CRAWL'] = False  # JS rendering = headless browser = noisy
-    settings['KATANA_PARALLELISM'] = 1
-    settings['KATANA_CONCURRENCY'] = 1
-
-    # --- ZAP Ajax Spider: DISABLED (browser-driven active crawling) ---
-    settings['ZAP_AJAX_SPIDER_ENABLED'] = False
-
-    # --- GAU: enable it (passive source) but throttle verification ---
-    settings['GAU_ENABLED'] = True
-    settings['GAU_VERIFY_RATE_LIMIT'] = 2
-    settings['GAU_VERIFY_THREADS'] = 1
-    settings['GAU_METHOD_DETECT_RATE_LIMIT'] = 2
-    settings['GAU_METHOD_DETECT_THREADS'] = 1
-    settings['GAU_WORKERS'] = 1
-
-    # --- ParamSpider: enable it (passive source) ---
-    settings['PARAMSPIDER_ENABLED'] = True
-    settings['PARAMSPIDER_WORKERS'] = 1
-
-    # --- Nuclei: passive-only scanning ---
-    settings['NUCLEI_DAST_MODE'] = False       # No active fuzzing
-    settings['NUCLEI_INTERACTSH'] = False      # No OOB callbacks
-    settings['NUCLEI_RATE_LIMIT'] = 5
-    settings['NUCLEI_CONCURRENCY'] = 2
-    settings['NUCLEI_BULK_SIZE'] = 5
-    settings['NUCLEI_HEADLESS'] = False
     # Exclude intrusive template tags
     existing_exclude = settings.get('NUCLEI_EXCLUDE_TAGS', [])
     stealth_exclude = ['dos', 'fuzz', 'intrusive', 'sqli', 'rce']
-    settings['NUCLEI_EXCLUDE_TAGS'] = list(set(existing_exclude + stealth_exclude))
-
-    # --- Subdomain Takeover: passive-only (subjack DNS, no nuclei HTTP fuzzing) ---
-    settings['NUCLEI_TAKEOVERS_ENABLED'] = False
-    settings['SUBJACK_ALL'] = False             # Don't probe non-CNAME hosts
-    settings['SUBJACK_CHECK_NS'] = True         # NS checks are safe DNS-only
-    settings['SUBJACK_CHECK_MAIL'] = True       # Mail checks are safe DNS-only
-    settings['SUBJACK_THREADS'] = 3
-    settings['TAKEOVER_RATE_LIMIT'] = 10
-    settings['BADDNS_ENABLED'] = False          # Keep isolated sidecar off in stealth
-
-    # --- VHost & SNI: disable entirely. The default 2,380-prefix wordlist plus
-    # L4 SNI brute would be both catastrophically slow over Tor AND noisy in
-    # exit-node logs. Users who really want stealth vhost discovery should
-    # build a custom preset (see red-team-operator) with graph-only candidates,
-    # L7-only, low concurrency. ---
-    settings['VHOST_SNI_ENABLED'] = False
-
-    # --- tlsx: KEEP it (a plain cert grab is one handshake per already-open port,
-    # far quieter than the vhost brute above), but force the loud dials off and
-    # throttle concurrency. JARM/JA3 add ~10 handshakes/target; version/cipher
-    # enum add extra connections per target. ---
-    settings['TLSX_PROBE_JARM'] = False
-    settings['TLSX_VERSION_ENUM'] = False
-    settings['TLSX_CIPHER_ENUM'] = False
-    settings['TLSX_CONCURRENCY'] = 5
-
-    # --- Origin Discovery: keep it (unmasking is the point of a stealth engagement)
-    # but throttle its active validation probes hard — 1 worker, ~1 rps — and drop
-    # the keyed internet-wide scanner searches (passive but credit-/fingerprint-heavy).
-    # The keyless + passive-DNS sources stay on; only the direct-IP probing is loud. ---
-    settings['ORIGIN_DISCOVERY_WORKERS'] = 1
-    settings['ORIGIN_DISCOVERY_RATE'] = 1
-    settings['ORIGIN_DISCOVERY_SCANNERS'] = False
-
-    # --- Web Cache Poisoning: disable entirely. Active poisoning probes (header
-    # mutation + repeated baseline/poison/clean fetches) are loud and send many
-    # requests per URL — incompatible with stealth/Tor. CPDoS stays force-off. ---
-    settings['WEB_CACHE_POISON_ENABLED'] = False
-    settings['WEB_CACHE_POISON_ALLOW_CPDOS'] = False
-
-    # --- Hakrawler: DISABLED (active crawler, no rate-limit control) ---
-    settings['HAKRAWLER_ENABLED'] = False
-
-    # --- jsluice: keep enabled but reduce file count ---
-    settings['JSLUICE_MAX_FILES'] = 20
-    settings['JSLUICE_PARALLELISM'] = 1
-
-    # --- FFuf: DISABLED (active directory brute-force) ---
-    settings['FFUF_ENABLED'] = False
-
-    # --- Kiterunner: DISABLED (active brute-force API discovery) ---
-    settings['KITERUNNER_ENABLED'] = False
-
-    # --- Arjun: force PASSIVE ONLY (no active probing in stealth) ---
-    settings['ARJUN_PASSIVE'] = True
-
-    # --- Banner Grabbing: DISABLED (direct socket connections) ---
-    settings['BANNER_GRAB_ENABLED'] = False
-
-    # --- Nmap: minimal parallelism ---
-    settings['NMAP_PARALLELISM'] = 1
-
-    # --- Shodan: reduce parallel workers ---
-    settings['SHODAN_WORKERS'] = 1
-
-    # --- OSINT enrichment: reduce parallel workers ---
-    settings['OTX_WORKERS'] = 1
-    settings['VIRUSTOTAL_WORKERS'] = 1
-    settings['CENSYS_WORKERS'] = 1
-    settings['CRIMINALIP_WORKERS'] = 1
-    settings['FOFA_WORKERS'] = 1
-    settings['NETLAS_WORKERS'] = 1
-    settings['ZOOMEYE_WORKERS'] = 1
-
-    # --- DNS: reduce parallel workers ---
-    settings['DNS_MAX_WORKERS'] = 5
-    settings['DNS_RECORD_PARALLELISM'] = False
-
-    # --- Subdomain Brute Force: DISABLED ---
-    settings['USE_BRUTEFORCE_FOR_SUBDOMAINS'] = False
-
-    # --- Passive sources: keep enabled but reduce results ---
-    settings['URLSCAN_MAX_RESULTS'] = min(settings.get('URLSCAN_MAX_RESULTS', 5000), 100)
-    settings['CRTSH_MAX_RESULTS'] = min(settings.get('CRTSH_MAX_RESULTS', 5000), 100)
-    settings['HACKERTARGET_MAX_RESULTS'] = min(settings.get('HACKERTARGET_MAX_RESULTS', 5000), 100)
-    settings['KNOCKPY_RECON_MAX_RESULTS'] = min(settings.get('KNOCKPY_RECON_MAX_RESULTS', 5000), 100)
-    settings['SUBFINDER_MAX_RESULTS'] = min(settings.get('SUBFINDER_MAX_RESULTS', 5000), 100)
-    settings['AMASS_ACTIVE'] = False
-    settings['AMASS_BRUTE'] = False
-    settings['AMASS_MAX_RESULTS'] = min(settings.get('AMASS_MAX_RESULTS', 5000), 100)
-
-    # --- Puredns: DISABLED (active DNS queries) ---
-    settings['PUREDNS_ENABLED'] = False
-
-    # --- Security Checks: disable active checks, keep passive ones ---
-    # Active checks (make network connections to target)
-    settings['SECURITY_CHECK_DIRECT_IP_HTTP'] = False
-    settings['SECURITY_CHECK_DIRECT_IP_HTTPS'] = False
-    settings['SECURITY_CHECK_WAF_BYPASS'] = False
-    settings['SECURITY_CHECK_ZONE_TRANSFER'] = False
-    settings['SECURITY_CHECK_ADMIN_PORT_EXPOSED'] = False
-    settings['SECURITY_CHECK_DATABASE_EXPOSED'] = False
-    settings['SECURITY_CHECK_REDIS_NO_AUTH'] = False
-    settings['SECURITY_CHECK_KUBERNETES_API_EXPOSED'] = False
-    settings['SECURITY_CHECK_SMTP_OPEN_RELAY'] = False
-    settings['SECURITY_CHECK_NO_RATE_LIMITING'] = False
-    # Passive checks remain enabled (SPF, DMARC, DNSSEC, TLS expiry, headers)
-
-    # --- Nmap: reduce aggressiveness ---
-    settings['NMAP_TIMING_TEMPLATE'] = 'T2'
-    settings['NMAP_SCRIPT_SCAN'] = False
-
-    # --- Masscan: DISABLED (active SYN scanning) ---
-    settings['MASSCAN_ENABLED'] = False
-
-    # --- JS Recon: disable validation (makes outbound API calls), reduce scope ---
-    settings['JS_RECON_MAX_FILES'] = 50
-    settings['JS_RECON_VALIDATE_KEYS'] = False
-    settings['JS_RECON_INCLUDE_CHUNKS'] = False
-    settings['JS_RECON_INCLUDE_FRAMEWORK_JS'] = False
-
-    # --- GraphQL Security: minimal introspection only ---
-    settings['GRAPHQL_SECURITY_ENABLED'] = True  # Can still do passive introspection
-    settings['GRAPHQL_INTROSPECTION_TEST'] = True
-    settings['GRAPHQL_RATE_LIMIT'] = 2            # Very low rate
-    settings['GRAPHQL_CONCURRENCY'] = 1           # Sequential only
-    settings['GRAPHQL_TIMEOUT'] = 60              # Longer timeout for slow responses
-
-    # --- GraphQL Cop: disable DoS probes in stealth mode ---
-    # (Info-leak + CSRF checks still run -- they're low-traffic.)
-    settings['GRAPHQL_COP_TEST_ALIAS_OVERLOADING'] = False
-    settings['GRAPHQL_COP_TEST_BATCH_QUERY'] = False
-    settings['GRAPHQL_COP_TEST_DIRECTIVE_OVERLOADING'] = False
-    settings['GRAPHQL_COP_TEST_CIRCULAR_INTROSPECTION'] = False
-
-    # --- AI Surface Recon: keep passive probes on, flip the marginally-active
-    # ones off, throttle concurrency. Stealth = quieter, not off. ---
-    settings['AI_SURFACE_RECON_MAX_WORKERS'] = 2
-    settings['AI_SURFACE_RECON_MCP_LIST_TOOLS_ENABLED'] = False  # extra JSON-RPC calls
-    settings['AI_SURFACE_RECON_VECTOR_DB_READ_ENABLED'] = False  # one GET per service
-
-    logger.info("Stealth overrides applied: Naabu=passive, Masscan=OFF, httpx=low-rate, Katana=minimal, "
-                "Nuclei=no-DAST, Kiterunner=OFF, BannerGrab=OFF, BruteForce=OFF, "
-                "ActiveSecurityChecks=OFF, JsRecon=reduced, GraphQL=introspection-only, "
-                "GraphQLCop=no-DoS, AISurfaceRecon=throttled")
+    # Sorted, not just de-duplicated: `list(set(...))` over strings orders by
+    # hash, which varies per process, so the same project produced a different
+    # nuclei command line on every run. Order means nothing to nuclei and
+    # everything to anyone comparing two runs.
+    settings['NUCLEI_EXCLUDE_TAGS'] = sorted(set(existing_exclude + stealth_exclude))
 
     return settings
 

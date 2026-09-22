@@ -1,0 +1,702 @@
+# RedAmon as an MCP Server (inbound)
+
+RedAmon can expose itself to **external AI agents** over the Model Context
+Protocol. A customer's own agent, an MCP-capable client, or a scripted pipeline
+connects in, authenticates as **one RedAmon user**, and can do three things
+scoped to that user's own projects: start a full recon pipeline, change a narrow
+set of recon tuning settings, and query the attack-surface graph.
+
+> **Two MCP features, opposite directions.** Do not confuse them.
+>
+> | | Direction | Where |
+> | --- | --- | --- |
+> | **MCP Tool Plugins** ([README.MCP.md](README.MCP.md)) | **outbound** — RedAmon is the *client* of servers you register | Global Settings → *MCP Tool Plugins* |
+> | **MCP Server** (this document) | **inbound** — other agents are the *clients*, RedAmon is the *server* | Global Settings → *MCP Server* |
+
+---
+
+## 1. What is and is not exposed
+
+**Exposed (thirty tools).**
+
+| Tool | What it does | Permission |
+| --- | --- | --- |
+| `list_projects` | The token owner's projects. Nothing else is visible. | `recon:read` |
+| `get_recon_status` | Whether a scan is running, and its phase. | `recon:read` |
+| `get_recon_settings` | The tuning subset this token may change. | `recon:read` |
+| `graph_summary` | Count per node type + relationships present. | `recon:read` |
+| `graph_schema` | What the graph *means*. No arguments, no data. | `recon:read` |
+| `query_graph` | Ask the graph a question in natural language. | `recon:read` (+ `graph:cypher` for raw Cypher) |
+| `kali_toolbox` | The Kali sandbox's installed toolset, by category. Reads code, not the container. | `recon:read` |
+| `start_recon` | Start the full recon pipeline. | `recon:scan` (+ `recon:overwrite` for `mode:"overwrite"`) |
+| `stop_recon` | Stop a running scan. | `recon:scan` |
+| `update_recon_settings` | Change any recon tuning value. Validated and capped at scan start rather than blocked. | `recon:settings` |
+| `create_project` | Open an engagement and fix its scope, atomically with the record of what authorized it. | `project:create` |
+| `attach_engagement_authorization` | Record the scope document that permits this engagement. Append-only. | `engagement:authorize` |
+| `list_engagement_authorizations` | The history of what authorized it, newest first. | `recon:read` |
+| `preflight_scope_check` | Read-only proof that the configured pipeline fits the scope. RESOLVED values, not written ones. | `recon:read` |
+| `kali_exec` | A shell in the sandbox: `bash -c`, full toolset, **no target check**. | `kali:exec` |
+| `kali_output` | That command's output, paged from a byte cursor. | `kali:exec` |
+| `kali_cancel` | Stop a command it started. | `kali:exec` |
+| `list_findings` | Every finding, ranked when a triage run has produced a ranking and honest about it when not. | `recon:read` |
+| `list_muted_findings` | The findings a person suppressed. Hidden from every other tool here. | `triage:read` |
+| `list_remediations` | What to fix, with CVSS, CVE/CWE/CAPEC, exploit and KEV flags. | `triage:read` |
+| `get_project_activity` | Every scan in flight on this project, plus whether a start would be refused. | `recon:read` |
+| `list_scan_versions` | Saved graph versions, with `pinned` and `hasSnapshot`. | `recon:read` |
+| `compare_scan_versions` | What changed between two graph states. Counts and names only. | `recon:read` |
+| `describe_recon_settings` | The reference manual for `update_recon_settings`: meanings, types, bounds. | `recon:read` |
+| `list_recon_presets` | The curated engagement presets, and how much of each is applicable here. | `recon:read` |
+| `get_attack_surface_overview` | Hosts, services, web surface and findings by severity, in one query. | `recon:read` |
+| `list_exploit_paths` | Technology + CVE pairs ranked by observed exploit, then CVSS. | `recon:read` |
+| `get_blast_radius` | Technologies ranked by how much of the surface they touch. | `recon:read` |
+| `list_graph_views` | Saved graph views, by name. Never their query text. | `recon:read` |
+| `run_graph_view` | Run a saved view through the same guards as raw Cypher. | `recon:read` + `graph:cypher` |
+| `queue_recon` | Queue a full recon for when the host has room. | `recon:queue` |
+| `cancel_queued_scan` | Cancel a queued job, reading the update count so a lost race is not reported as success. | `recon:queue` |
+| `get_scan_status` | The other six scanners' state, masked exactly as `get_recon_status` is. | `recon:read` |
+| `set_finding_verdict` | Record a durable triage verdict. Refused while a triage run could re-file it. | `triage:write` |
+
+**Deliberately not exposed:** the agent chat, a shell, partial recon, project
+create/delete/import, secrets and LLM keys, target and scope fields, Rules of
+Engagement, guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
+attack-surface scan, captured HTTP traffic, version activation or deletion, and
+any graph **write**.
+
+Note the distinction the reads above draw: their FINDINGS are readable (a
+finding is a finding whichever scanner wrote it), while **starting** those scans
+is not. Muting and unmuting are not exposed either, in either direction: mute is
+the one action that makes a finding invisible to every other read here, and
+unmute reverses a human's suppression decision, which is exactly the power the
+architecture withholds from the model-driven path.
+
+`kali_toolbox` serves the `kali_shell` `TOOL_REGISTRY` description verbatim -
+the same bytes the in-app agent is prompted with. One source, no second copy: a
+transcription would drift from the image the moment a tool is added, and a
+catalogue that lies about what is installed is worse than none. All of it is
+runnable, because `kali_exec` is a shell.
+
+One correction is appended, and it is not a fork of the catalogue. The catalogue
+is written FOR the in-app agent, which has dedicated tools (`execute_nmap`,
+`execute_nuclei`, `execute_curl`) alongside `kali_shell`, so it ends by telling
+the reader NOT to use the shell for those. An MCP caller has no dedicated tools:
+`kali_exec` is the only way it runs anything, so read literally that line tells
+it not to use the one tool it has. A short `NOTE FOR MCP CALLERS` after the
+catalogue says so, and names the tools the advice steered it away from.
+
+Served by the agent's `GET /kali/toolbox` (`require_master_internal_auth`). It
+never calls the kali-sandbox, holds no `MCP_AUTH_TOKEN`, and takes no
+`projectId`, so it answers even when the sandbox is down.
+
+### 1.1 `kali_exec` IS `kali_shell`
+
+**This is a shell, by decision.** `kali_exec` hands the command verbatim to
+`kali_shell`, which is `subprocess.run(["bash", "-c", command])` on a container
+with `NET_ADMIN`, `NET_RAW`, `seccomp:unconfined` and open egress. Pipelines,
+redirection, substitution, loops and every installed binary all work. There is
+no allowlist, no per-flag check and **no per-command target check**.
+
+That is deliberate parity with the in-app agent, and the reasoning is worth
+recording because an earlier version of this file argued the opposite at length.
+
+**The in-app agent has no per-command admission either.** Its gates are a HUMAN
+clicking the `DANGEROUS_TOOLS` confirmation (`REQUIRE_TOOL_CONFIRMATION`,
+default on), an RoE check that matches tool NAMES and never reads a command
+string, and a scope guardrail that runs once per session. None of those inspects
+`kali_shell "nmap victim.tld"`. So a guard on the MCP path was not restoring
+parity with the drawer - it was holding the MCP path to a standard the drawer
+was never held to.
+
+**What carries the weight instead is reachability.** Three independent switches,
+each owned by a different decision-maker, and all three must be on:
+
+| # | Switch | Who sets it | Default |
+| --- | --- | --- | --- |
+| 1 | `MCP_KALI_EXEC_ENABLED` | operator, per deployment | **off** |
+| 2 | the `kali:exec` scope | user, password-confirmed at mint | **off** |
+| 3 | `project.mcpKaliExecEnabled` | a human in the project form | **off** |
+
+Switch 3 is `mcp: never` in the settings registry with the reason `escalation`,
+so `update_recon_settings` cannot turn it on: a token can never grant itself
+this. A token holding all three has a root shell in the sandbox,
+and that is the intended contract.
+
+**What this costs, stated plainly.** There is no server-side restraint on where a
+command points. An agent granted `kali:exec` can reach any host the sandbox can,
+including one this project is not for. The product's scope boundary is enforced
+for `update_recon_settings` (§6) and for the recon pipeline; on this path it is
+not enforced at all, and the surface says so in three places the agent actually
+reads: the `kali_exec` tool description, the `kali:exec` consent copy, and the
+Agent Onboarding pack. `onboarding.test.ts` fails if that phrasing regresses to
+promising a check.
+
+**What is still enforced**, because neither is about the command:
+
+- The job id must be `uuid4().hex`, and the log path is composed server-side
+  from `(project_id, job_id)`. `JobRegistry.status()` falls back to reading a
+  `.meta.json` off disk, and `kali_exec` can write into that workspace, so
+  trusting the `output_path` it carries was an arbitrary file read on the AGENT
+  container - `/proc/self/environ`, and with it `INTERNAL_API_KEY` and the Neo4j
+  password. Regression-tested in `LogPathTrustTests`.
+- The endpoints require the MASTER internal key, not `SCANNER_API_KEY`, which
+  every spawned scan container holds.
+- A finished-but-failed job is readable, not a 404, and a run killed at the
+  sandbox's 300s cap reports `status=failed` with the reason - never a clean
+  exit 0.
+
+## 2. Turning it on
+
+It is **off by default**. A new authenticated inbound surface must be switched on
+deliberately, never inherited by upgrading.
+
+```bash
+# 1. In .env (redamon.sh writes the switch for you on install)
+MCP_SERVER_ENABLED=true
+
+# 2. Apply. The webapp has NO env_file, so this variable is read from the
+#    compose `environment:` block - editing .env alone is not enough on its own,
+#    but the block is already wired, so a normal restart picks it up.
+docker compose up -d webapp
+```
+
+`redamon.sh` **refuses** to enable it while `INTERNAL_API_KEY` is unset or still
+`changeme`. That is not a formality: the agent's auth fails *open* in that state
+(`agentic/llm_guard.py` `_key_ok`) and the base compose publishes the agent on
+`0.0.0.0:8090`, so the whole graph-isolation story would rest on a check that is
+not running. Run `./redamon.sh install` to generate the secrets first.
+
+### Knobs
+
+All are optional; unset keeps the documented code default. All are wired into the
+webapp's compose `environment:` block, because **the webapp has no `env_file`**
+and a value set only in `.env` would be silently inert.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MCP_SERVER_ENABLED` | `false` | The master switch. |
+| `MCP_KALI_EXEC_ENABLED` | `false` | `kali_exec` / `kali_output` / `kali_cancel`. Independent of the master switch on purpose. |
+| `MCP_RATE_EXEC_PER_MIN` | `20` | `kali_exec` calls per token per minute. Polling uses the read bucket. |
+| `MCP_TOKEN_RETENTION_DAYS` | `90` | How long revoked/expired token rows are kept before pruning. |
+| `MCP_RATE_READ_PER_MIN` | `120` | Cheap reads per token per minute. |
+| `MCP_RATE_QUERY_PER_MIN` | `20` | `query_graph` calls per token per minute. |
+| `MCP_RATE_WRITE_PER_MIN` | `10` | Settings/stop calls per token per minute. |
+| `MCP_RATE_START_PER_WINDOW` | `1` | Scan starts per project per window. |
+| `MCP_RATE_START_WINDOW_MS` | `300000` | That window (5 minutes). |
+| `MCP_RATE_COMPARE_PER_WINDOW` | `2` | `compare_scan_versions` calls per project per window. Its own bucket, not `query`: one call can gunzip and parse a whole stored graph. |
+| `MCP_RATE_COMPARE_WINDOW_MS` | `300000` | That window (5 minutes). |
+| `MCP_DISABLED_TOOLS` | (empty) | Comma-separated tool names to withdraw. They disappear from `tools/list` rather than refusing, so a client never plans around them. The per-tool alternative to taking the whole surface down; a name matching no tool is ignored. |
+| `MCP_LLM_DAILY_BUDGET` | `200` | NL queries per token per day (they spend the owner's LLM key). |
+
+> **The generated API reference describes a build, not a deployment.** It is
+> rendered from the server's own `tools/list` with no tool withdrawn, so a
+> deployment using `MCP_DISABLED_TOOLS` advertises fewer tools than the page
+> lists. Ask the server itself if you need the authoritative set for one host.
+
+Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
+`NEO4J_QUERY_TIMEOUT_MS` (120s), `GRAPH_EXEC_MAX_RECORDS` (1000),
+`GRAPH_EXEC_MAX_BYTES` (2 MiB), `GRAPH_EXEC_MCP_CONCURRENCY` (2).
+
+---
+
+## 3. Minting a token
+
+**Global Settings → MCP Server → New token.**
+
+- **Minting is self-only**, judged on your real login identity. An admin viewing
+  another user's settings sees the form disabled with a reason: a token minted
+  that way would outlive the act-as session, need no further authentication, and
+  be indistinguishable from the user's own calls. Admins *can* list, narrow and revoke;
+  taking power away is a safe privilege, adding it is not.
+- It asks for your **password again**. A stolen 7-day session cookie must not
+  silently become a credential that outlives logout.
+- **Permissions default to read-only.** Every write permission is opt-in, and
+  each says what it allows. `recon:overwrite` says plainly that it permits
+  discarding the current graph.
+- **An Agent Profile picks the starting permission set** (§3.1). It is a label
+  and a suggestion, never an authorization input.
+- **`triage:write` is the only write to a finding**, and the only one that
+  cannot be undone from this surface except by another verdict. It writes
+  `triage_source = 'human'` deliberately: a third provenance value would make
+  the finding prune-eligible on the next scan, let a later AI run overwrite the
+  verdict, stop `likely_noise` producing a false-positive state, and render as
+  "Not reviewed". The channel is recorded on `triage_verdict_channel` instead,
+  and the actor on `triage_verdict_by`. It can never mute or unmute.
+- **`recon:queue` is separate from `recon:scan`**, because a queued job
+  dispatches LATER. `JobQueue` carries no token id and revoking a token writes
+  only `revokedAt`, so work queued by a credential OUTLIVES that credential;
+  only `cancel_queued_scan` or the Activity view stops it. The same missing
+  column means a queued job appears in the operator's own queue attributed to
+  them, with nothing marking it as an agent's.
+- **`triage:read` is separate from `recon:read` on purpose**, and it is the one
+  read permission that is not ticked by default. It unlocks the findings a
+  person deliberately suppressed (with who muted them and why) and the
+  remediation write-ups. Neither was reachable by any route before, so folding
+  them into `recon:read` would have changed what every already-minted token can
+  read, with no operator action and no visible change to its permission chips.
+- **Expiry** defaults to 90 days. It is re-checked on *every call*, so expiry and
+  revocation take effect mid-session rather than at the client's next reconnect.
+- The token is shown **once**. Afterwards only its first 8 characters are ever
+  displayed.
+
+**Editing a token** (`PATCH /api/users/[id]/mcp-tokens/[tokenId]`) changes its
+name, scopes and expiry (`expiry`: `30|60|90|365`, `"never"`, `"now"`, or a
+`YYYY-MM-DD` date that lasts to the end of that day UTC). The hash and owner are
+never mutable, and a revoked token can only be renamed. Edits are judged by
+**direction**:
+
+- **Narrowing** (drop a scope, earlier expiry, `"now"`, rename) keeps the admin
+  bypass, like revoke.
+- **Widening** (add a scope, later or no expiry, reviving an expired token) gets
+  the mint's step-up: self-only on the real identity, password re-confirmed, and
+  the same limiter key as minting, so the two share one attempt budget. Without
+  this a stolen session cookie could upgrade an existing token into the
+  credential it cannot mint. `isTokenWidening` in `webapp/src/lib/mcpAuth.ts` is
+  the single rule, used by both the route and the tab.
+
+Scopes and expiry are re-read on every MCP call, so an edit applies on the
+agent's next call. Capability edits audit as `mcp-token.update` with
+before/after values and `widened`.
+
+**Any password change revokes every token** for that user, including an admin
+reset (which needs no current password). A reset that left live programmatic
+credentials behind would not actually lock the account.
+
+---
+
+### 3.1 Agent Profiles, and why they are safe
+
+A token is minted FOR A JOB. `McpAccessToken.profile` records which, and the
+registry lives in [`webapp/src/lib/mcp/profiles.ts`](../../webapp/src/lib/mcp/profiles.ts).
+
+```prisma
+/// NOT an authorization input. Scopes alone are enforced.
+profile String?
+```
+
+Nullable, so every row minted before the field existed is valid and reads as
+`custom`. An UNKNOWN profile is rejected at mint and at PATCH rather than
+coerced, mirroring `validateScopes`: silently storing something the operator did
+not ask for labels a credential as a job nobody chose.
+
+**The field is never read by any authorization path.** Not `resolveMcpToken`,
+not `requireScope`, not the rate limiter, not a tool body. `profiles.test.ts`
+enforces this two ways: `mcpAuth.ts` must not contain the string `profile` at
+all, and no other module under `src/lib/mcp/` may read `.profile` off a token or
+context. A second, weaker authorization path is the one genuinely dangerous
+thing this feature could have introduced, so the control is a grep rather than a
+convention.
+
+The profile is read in exactly one place on the request path,
+[`instructions.ts`](../../webapp/src/lib/mcp/instructions.ts), to choose the
+editorial slant of the connect-time onboarding string, and only on `initialize`.
+That read selects `{ profile: true }` and nothing else, and any failure falls
+back to `custom`: failing to personalise a paragraph must never fail a
+connection.
+
+**Profile → recommended scopes.** Every profile starts from `recon:read`, and
+seven of the thirteen grant no write of any kind.
+
+| Profile | Recommended | Opt-in (never auto-ticked) |
+| --- | --- | --- |
+| `bug_bounty` | read, scan, triage:read, cypher | `kali:exec` |
+| `pentest` | read, scan, triage:read, cypher | `kali:exec` |
+| `asm` | read, scan, queue, triage:read | - |
+| `vuln_mgmt` | read, triage:read | - |
+| `triage` | read, triage:read, **triage:write** | - |
+| `inventory` | read, cypher | - |
+| `compliance` | read, triage:read | - |
+| `ci_gating` | read, queue, triage:read | - |
+| `reporting` | read, triage:read, cypher | - |
+| `ma_risk` | read, scan, triage:read, cypher | - |
+| `threat_intel` | read, triage:read, cypher | - |
+| `soc` | read, cypher | - |
+| `research` | read, scan, **settings**, triage:read, cypher | `recon:overwrite`, `kali:exec` |
+| `custom` | read | - |
+
+The rules behind it, each asserted in `profiles.test.ts`:
+
+1. **`kali:exec` and `recon:overwrite` are in NO profile's `recommendedScopes`.**
+   They may appear only in `optInScopes`, which the form renders unchecked behind
+   a danger callout. This is the most important assertion in the feature:
+   command execution at a live target and irreversible graph destruction must
+   not arrive as a side effect of a dropdown.
+2. **`triage:write` and `recon:settings` each go to exactly one profile.**
+3. **Unattended profiles prefer `recon:queue`.** `asm` and `ci_gating` run with
+   nobody watching, where a direct start just fails on a busy project.
+4. **Read-only wherever the job allows it.**
+
+**A profile switch is judged by the existing widening check.** Switching profile
+in the UI re-ticks the boxes, and the resulting scope SET flows through
+`isTokenWidening` exactly like a hand tick, so a profile-driven widen demands the
+same password step-up. A profile change with no scope change grants nothing and
+needs no step-up; it is also allowed on a revoked token, like a rename.
+
+### 3.2 Agent Onboarding: generating the pack
+
+[`onboarding.ts`](../../webapp/src/lib/mcp/onboarding.ts) renders the operator's
+download, and [`instructions.ts`](../../webapp/src/lib/mcp/instructions.ts) the
+connect-time string, from one source. Built like `apiReference.ts`: the
+machine-readable half comes from the server's own `tools/list`, so it cannot
+describe a tool differently from how the server serves it, and a tool withdrawn
+by `MCP_DISABLED_TOOLS` is absent from the pack for free because it never
+reaches the list.
+
+**Two filters, deliberately separate:**
+
+- the **scope filter** is hard. `canCall` renders a tool as available only when
+  the token holds every required scope; everything else goes in the
+  "cannot call" tail with the permission it needs. A conditional scope is
+  reported as a withheld ARGUMENT, not a missing tool.
+- the **profile filter** is editorial. It chooses which workflows and tone are
+  emphasised, and nothing else.
+
+The pack renders **profile ∩ scopes**, plus the cannot-do tail. A profile that
+leans on a tool this token cannot reach names the missing PERMISSION, never the
+tool, so the profile section can never promise a call that will be refused;
+`onboarding.test.ts` asserts exactly that over every profile and several scope
+sets.
+
+The hand-written half lives in
+[`playbook.ts`](../../webapp/src/lib/mcp/playbook.ts) as three registries, each
+guarded by a coverage test: `CAPABILITY_AREAS` (every tool in exactly one area),
+`ONBOARDING_PLAYBOOK` (one entry per tool) and `WORKFLOWS` (rendered only when
+the token can call every tool they need).
+
+**Adding a tool to the MCP server now also means adding its playbook entry and
+filing it under a capability area.** The coverage test goes red in the same
+commit otherwise, which is what makes "the pack covers the whole surface" a
+guarantee rather than an intention.
+
+Output is deterministic: no dates, and the version stamp is injected, so the
+same `(profile, scopes, serverUrl, style, layout)` renders byte-identical bytes.
+
+**Nothing user-specific may enter the output** - no token, no project name, no
+target, no rules-of-engagement text - because a `SKILL.md` gets committed into a
+repository. The route
+(`POST /api/users/[id]/agent-onboarding`) is session-authed with
+`requireUserAccess`, not bearer-authed, and it grants nothing: the scopes in its
+body describe a document, no token is read and no row is written. The only
+caller-controlled string that reaches the file is the server URL, and only its
+ORIGIN survives, after an http/https check.
+
+## 4. Connecting a client
+
+The mint dialog renders this pre-filled, so it is copy-paste with no editing:
+
+```json
+{
+  "mcpServers": {
+    "redamon": {
+      "url": "https://<redamon-host>/api/mcp-server",
+      "headers": { "Authorization": "Bearer rdmn_mcp_<token>" }
+    }
+  }
+}
+```
+
+Client support for a **static bearer header on a remote MCP server** varies and
+changes, so this document does not assert a list. **Verify your client end to
+end before relying on it.** Claude Code, for example:
+
+```bash
+claude mcp add --transport http redamon https://<host>/api/mcp-server \
+  --header "Authorization: Bearer rdmn_mcp_<token>"
+```
+
+---
+
+## 5. Behind nginx (single-host deploy)
+
+The deploy template ships an **exact-match** location plus its own rate zone:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=mcp:10m rate=10r/s;
+location = /api/mcp-server { ... }
+```
+
+Two things worth knowing before you edit it:
+
+- The `=` is load-bearing. A prefix block written `location /api/mcp-server/`
+  does **not** match the endpoint URL `/api/mcp-server`; the request silently
+  falls through to `location /api/` with the UI rate zone.
+- A location carrying any `add_header` does **not** inherit the server-level
+  ones, so HSTS/CSP and `Cache-Control` are re-emitted inside the block. Remove
+  them and they are silently lost on this endpoint.
+
+**`GATE_MODE=basic_auth` is mutually exclusive with bearer auth** — Basic and
+Bearer cannot both travel in one `Authorization` header. Under that mode the
+endpoint returns **403 by default**. To open it:
+
+```bash
+MCP_EDGE_ALLOW_BEARER=true   # emits `auth_basic off` for this one location
+```
+
+### The firewall is a separate gate, and it comes FIRST
+
+This is the step people miss. `MCP_EDGE_ALLOW_BEARER` controls nginx. It does not
+control the firewall, and the firewall runs first.
+
+`ufw` scopes the app port to `OPERATOR_ALLOW_CIDRS` whenever that is set (the
+recommended posture). It filters by PORT and **cannot see the URL path**, so an
+agent connecting from anywhere else is dropped before nginx is consulted at all.
+On such a host, flipping `MCP_EDGE_ALLOW_BEARER` alone changes nothing and the
+client simply times out.
+
+```bash
+MCP_CLIENT_CIDRS=198.51.100.0/24   # where your AGENT connects from
+```
+
+That admits those sources to the port, and the exact-match nginx location then
+narrows them to `/api/mcp-server` only: they do not gain the UI, the login page
+or the agent WebSocket paths.
+
+With no `MCP_CLIENT_CIDRS`, the location inherits the server's `allow`/`deny`
+unchanged: the operator gate **and** the token. That is the right posture when
+the agent runs on the operator's own network, and the wrong one for a remote
+agent.
+
+Three gates, all of which must admit the agent: the cloud Security Group, `ufw`,
+then nginx. `./deploy.sh verify` probes the endpoint and tells the failure modes
+apart (404 disabled, 401 working, 403 edge gate). Repeated 401s are banned by the
+`redamon-mcp-auth` fail2ban jail.
+
+### http-* modes are refused
+
+`deploy.sh` will not enable MCP in an `http-*` ACCESS_MODE, and `ALLOW_INSECURE=1`
+does not override it. The credential is a bearer token in a header: over plaintext
+it crosses the wire on every call and, unlike a session cookie, it outlives the
+session, so one capture is a durable credential.
+
+In `https-ip` with a self-signed certificate most MCP clients reject the
+connection. Use a real certificate (`TLS_MODE=provided`) or a domain.
+
+---
+
+## 6. The security model
+
+### Identity
+
+A token resolves to exactly **one** `userId`. There is no admin act-as for
+tokens. Every project-scoped tool calls an ownership check first, and a project
+that does not exist and one owned by someone else give the **same** answer, so a
+token holder cannot enumerate other users' project ids.
+
+That check deliberately does **not** honour `ACCESS_ENFORCE`. The shared
+browser-facing guard degrades an ownership violation to a logged warning when
+`ACCESS_ENFORCE=0`; on a credentialed, internet-reachable surface that would be a
+cross-tenant data breach toggled by an environment variable.
+
+**`ACCESS_ENFORCE=0` and `MCP_SERVER_ENABLED=true` are not a supported
+combination**, and this is a known, accepted asymmetry rather than a fix
+pending. The hard check above covers the READ side. The browser-side *writers*
+that produce some of the rows those reads return - saved graph views,
+remediations, queued jobs - authorise with the shared guard, which in that mode
+degrades to log-and-allow. The sharpest case is a saved graph view: a different
+user could plant a row in this project and an MCP token would later execute it
+through `run_graph_view`. The guarantee on the read side cannot be stronger than
+the write that created the row.
+
+### The route is bearer-only
+
+It ignores the session cookie, `X-Internal-Key` and `X-Scanner-Key`:
+
+- honouring the cookie would make this middleware-exempt, state-changing POST
+  **CSRF-reachable** from a logged-in operator's browser;
+- honouring the scanner key would let a leaked token — held by *every* spawned
+  scan container, the least-trusted tier — authenticate to the control plane.
+
+It also requires `Content-Type: application/json`, rejects a foreign `Origin`,
+rejects JSON-RPC batches, caps the body at 64 KiB, and answers `GET`/`DELETE`
+with 405.
+
+### The settings surface
+
+`PUT /api/projects/[id]` spreads its body straight into `prisma.project.update`,
+and `Project` has over 700 scalar columns — so anything that reaches it is
+written. Describing exclusions in prose is therefore not a control.
+
+**The allowlist stopped being the control; validation at the point of use became
+it.** The first version of this surface refused 586 of the 712 columns by name,
+which was a crude proxy for "this value could be dangerous" and wrong in both
+directions: it refused `nucleiTags`, a bug-class filter, while permitting
+`takeoverRateLimit` to run at 500 rps past a 3 rps engagement ceiling.
+
+Every parameter is now described once, in
+[`recon_settings/registry.yaml`](../../recon_settings/registry.yaml), and each
+one carries a bound or a named validator. Three dispositions decide what a token
+may write:
+
+| Disposition | Count | What it means |
+| --- | --- | --- |
+| `settable` | 648 | write at any time through `update_recon_settings` |
+| `create_only` | 19 | the engagement scope: written once by `create_project`, refused by name afterwards |
+| `never` | 47 | not a pipeline parameter at all; refused with its class. 24 of these are the engagement RECORD |
+
+There used to be a fourth, `tighten_only`, holding the Rules of Engagement under
+a write-time direction rule. It is deleted rather than migrated. The rule bought
+the appearance of a guarantee and not the guarantee: five of the fields it
+covered - the whole time window - accepted a WIDENING while reporting a
+tightening, because `narrow` has no machine-checkable direction.
+
+What replaced it is that the engagement splits in two. Its 15 LIMITS - the
+rate ceiling, the never-touch hosts, the scanning window, the agent's denylists -
+are ordinary `settable` fields in the `engagement_limits` group, reachable from
+the project form and from `update_recon_settings` alike, in either direction.
+What makes them safe is that every one is ENFORCED at scan start whatever the
+setting says. Its 24 RECORD columns - the client, the contacts, the dates,
+the uploaded document - are `never`, with `deny_reason: engagement-record`: a
+person writes them, a model reads them, nothing enforces them, and they carry a
+third party's personal data.
+
+A test walking `Prisma.ProjectScalarFieldEnum` fails until every column has an
+entry, so a new Prisma field still fails the build until someone describes it —
+but describing it is now writing what it means and what it accepts, rather than
+deciding whether to refuse it.
+
+The attack this still prevents:
+
+```
+update_recon_settings({targetDomain: "victim.com", targetGuardrailEnabled: false})
+start_recon()
+```
+
+Both fields are `create_only`, so both are refused by name on a project that
+already exists, with a pointer to `create_project`. Scope moves with a new
+project, never with a new value on an old one. Unknown keys reject the **whole
+call by name**, never silently.
+
+**What replaced each deny class.** A rate above the engagement ceiling is
+rewritten to the ceiling at scan start. A container image outside the shipped
+set is pinned back to the default with a `[guardrail]` line — the precedent
+`sanitize_image_settings()` already set. A custom header may not carry CR, LF,
+`Host`, `Authorization`, `Cookie` or `Proxy-*`, each of which would change where
+a request goes rather than annotate it. A wordlist or template path must resolve
+inside this project's own directories, checked at the write AND again at
+settings load, because a row also arrives through the webapp, an import and a
+version restore.
+
+That last one is not theoretical: ffuf sends each wordlist LINE as a URL path
+and records which ones responded, so a wordlist aimed at a file inside the scan
+container reflected its contents into the graph. The deny list was the only
+thing in front of it.
+
+**Written is not resolved.** `get_recon_settings` echoes what a caller wrote;
+`preflight_scope_check` reports what the scan will actually run with. They
+differ wherever the runtime corrects a value, and an agent that only read the
+first would believe a rejected value was accepted.
+
+### Prompt injection is expected
+
+Everything the graph tools return is derived from scanner output about a live
+target: page titles, headers, JS comments, certificate fields, findings text.
+That data lands in the *external* agent's context, and that agent holds this
+server's tools. Assume an instruction embedded in a page title reaches the model.
+
+| What an injected instruction could try | What stops it |
+| --- | --- |
+| Redirect the platform at a new target | Scope is `create_only`: refused by name on an existing project, whatever the token holds. A different target means a different project. |
+| Discard the victim's graph history | `mode:"overwrite"` needs `recon:overwrite`, off by default. |
+| Launch a scan storm | Strict per-token/per-project start bucket + the orchestrator's one-scan-per-project rule. |
+| Escalate scan aggression | Aggression is SETTABLE and CAPPED instead of refused. Every rate resolves to at most the engagement ceiling at scan start, and `roeForbiddenTools` / `roeForbiddenCategories` / `roeAllowDos` are checked in code before a tool executes. A `third_party` engagement cannot start without a ceiling at all. |
+| Loosen the engagement to make room | Nothing REFUSES it, and that is deliberate: a write-time direction rule covered five fields it could not actually check. What stops it mattering is that the limits are applied at scan start regardless, the change is audited with a before and an after, and `preflight_scope_check` reports the RESOLVED configuration rather than the written one. A queued job whose limits changed goes to `needs_review` instead of dispatching. |
+| Disable the engagement limits wholesale | There is no flag to write. `roeEnabled` is derived from whether any limit is SET, so removing a limit means removing it visibly rather than flipping one boolean and leaving every field displaying its old value. |
+| Point a scan tool at a local file | A wordlist or template path must resolve inside this project's own directories, checked at the write and again at settings load. |
+| Make the scan run an attacker's container | Every `*DockerImage` field is a closed list of the shipped images and an out-of-set value is REFUSED at the write. It used to be accepted and pinned back at scan start, which contained the danger but not the dishonesty: `get_recon_settings` echoed an image the scan would never run. |
+| Reconfigure a job already in the queue | The C-4 fingerprint covers every field that steers where or how hard a job scans, including every engagement limit and the DERIVED answer to whether they are live, so the job goes to `needs_review` instead of dispatching. |
+| Exfiltrate another tenant's data | Ownership check + `scope_query` + result post-validation. |
+| Exfiltrate secrets | No tool returns a credential. |
+| Burn the owner's LLM budget | Per-token daily budget. |
+| Aim a command at a third party | **Nothing, once `kali:exec` is granted.** See below. |
+| Smuggle a second command | **Nothing, and nothing is meant to.** A shell is the feature. |
+| Read the sandbox's own environment or keys | **Nothing, once `kali:exec` is granted.** See below. |
+
+### The `kali:exec` residual, stated plainly
+
+The three rows above used to claim a per-host scope check, an allowlist that
+admitted no interpreter, and path confinement. **None of those exist any more.**
+`kali_exec` is `bash -c` in the sandbox (§1.1), so an agent holding that scope
+can run any installed binary against any host the sandbox can reach, use
+pipelines and redirection freely, and read the sandbox's own process
+environment.
+
+That environment is not empty. At the time of writing the kali-sandbox
+container carries `SCANNER_API_KEY`, `MCP_AUTH_TOKEN` and `TUNNEL_AUTH_TOKEN`,
+so `env` is a credential read. `SCANNER_API_KEY` is the one to weigh: this route
+deliberately refuses `X-Scanner-Key` as an inbound credential precisely because
+the scanner tier is the least trusted, and an agent that can read it out of the
+sandbox has recovered what the route declined to accept.
+
+Two consequences worth stating rather than leaving to inference:
+
+- **On a cloud deploy the instance metadata endpoint is reachable**
+  (`169.254.169.254`), which on AWS returns the instance role's credentials.
+  Nothing on this path refuses it.
+- **Scope is the operator's judgement, not the code's.** The containment for
+  `kali:exec` is entirely in who gets the scope: it is off by default, needs
+  `MCP_KALI_EXEC_ENABLED` on the deployment AND a per-project opt-in, and every
+  call is audited. With no refusal path left, **the audit row is the only record
+  of what an agent did with the shell**, which makes it more load-bearing than
+  when a guard existed.
+
+Grant `kali:exec` only to an agent you would trust with a terminal on that box,
+and prefer a deployment where the sandbox holds no credential you would mind
+losing.
+
+The other residual: a compromised external agent can do, within one user's own
+projects, whatever that user's token already permits. That is inherent to
+delegating a credential, and is why the default token is read-only.
+
+### Result post-validation
+
+Every node and relationship returned by a graph tool is re-checked against the
+caller's tenant **on the way out**, and a violation drops the *whole* response
+and writes an error-level audit record. This is defence in depth, not the primary
+control — `scope_query` scopes the query server-side — but that filter has failed
+once already (an unlabelled `MATCH (n)` once bypassed it), and on an
+internet-reachable surface the same regression would be a *remote* cross-tenant
+breach. Scalar projections carry no tenant keys to check; that residual is
+accepted and bounded by `scope_query` alone.
+
+---
+
+## 7. Audit
+
+Every call writes an `AuditLog` row: `mcp.<tool>`, the actor, the project, and
+the token id and prefix. **Failures are audited too** — invalid, expired and
+revoked token presentations (by prefix, never the token), scope denials,
+ownership 404s and every post-validation violation — because that is the only way
+a token brute force or a replayed revoked token becomes visible.
+
+A `start_recon` also produces the normal `ScanJob` history row with
+`initiatedByUserId` set to the token owner, and the audit record carries the
+`scanJobId` so a run traces back to a token.
+
+There is **no audit-log viewer in the product**: reconstruction is a SQL query
+against `audit_log`. Known and accepted; a minimal admin view is a follow-up.
+
+---
+
+## 8. Operational notes
+
+- **Settings apply to the NEXT scan.** Recon reads its settings once, at
+  container spawn, so `update_recon_settings` refuses while a scan is writing the
+  graph rather than accepting a write that would do nothing.
+- **`start_recon` is stricter than the button.** It also refuses while a human is
+  mid-session with the in-app agent or a triage run. Those are excluded from the
+  normal check because a person running both is normal *and can see both*; an
+  unattended external caller cannot, and a full scan would wipe the graph
+  underneath them.
+- **`mode:"new"` consumes a retention slot.** Old unpinned versions are trimmed
+  past `SCAN_VERSION_RETENTION_KEEP` (default 20).
+- **A dependency failure is never an empty result.** An unreachable orchestrator
+  reports "status unknown", never "not running"; a graph failure never returns an
+  empty summary. Conflating the two produces a false negative in a security tool.
+
+---
+
+## 9. Related
+
+- [README.MCP.md](README.MCP.md) — the outbound direction (system MCP servers + MCP Tool Plugins)
+- [README.GRAPH_DB.md](README.GRAPH_DB.md) — the attack-surface graph
+- [graph_db/schema_sections.md](../../graph_db/schema_sections.md) — the node labels and relationships `graph_schema` serves
+- [GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) — why the graph is shaped this way (lists no labels)
+- [MCP-Server wiki page](../../redamon.wiki/MCP-Server.md) — the operator's view, including the Agent Profile table

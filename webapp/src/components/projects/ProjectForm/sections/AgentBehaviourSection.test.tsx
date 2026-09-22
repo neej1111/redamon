@@ -43,7 +43,7 @@ function renderSection(initial: Record<string, unknown> = {}, detectedHostIp?: s
 describe('LHOST field guides to the host LAN IP, not the container IP', () => {
   test('placeholder is a LAN-style example, never a 172.x container address', () => {
     renderSection()
-    const lhost = screen.getByPlaceholderText(/^e\.g\. /) as HTMLInputElement
+    const lhost = screen.getByPlaceholderText(/^e\.g\. \d/) as HTMLInputElement
     expect(lhost.placeholder).toBe('e.g. 192.168.1.50')
     expect(lhost.placeholder).not.toMatch(/172\./)
   })
@@ -89,5 +89,64 @@ describe('detected host IP suggestion (issue #180)', () => {
   test('suppressed under a tunnel (LHOST field is hidden)', () => {
     renderSection({ agentNgrokTunnelEnabled: true }, '192.168.1.50')
     expect(screen.queryByText(/Detected \(default route\)/)).toBeNull()
+  })
+})
+
+/**
+ * The engagement's two closed vocabularies, and why a near-miss is dangerous
+ * rather than merely untidy.
+ *
+ * `roeForbiddenTools` and `roeForbiddenCategories` are both matched EXACTLY by
+ * the gate in execute_plan_node.py: the tool name against the dispatched name,
+ * the category against CATEGORY_TOOL_MAP's keys. A value that is almost right
+ * is not partially enforced, it is not enforced at all - and it still renders
+ * as a rule in the UI and still reaches the agent's prompt as advice, so the
+ * engagement looks constrained while the tool runs.
+ *
+ * This was live: a real project held "Denial of Service", "Brute Forcing" and
+ * "Password Spraying" as forbidden categories, none of which the gate knows, and
+ * `execute_sqlmap` as a forbidden tool, which is not a tool at all. The tools
+ * field was a comma-separated text box whose own placeholder suggested
+ * `execute_sqlmap`, so the product taught the value that could not work.
+ */
+describe('a forbidden tool or category can only be one the gate enforces', () => {
+  test('the tools offered are exactly the registry vocabulary', async () => {
+    const { field } = await import('@/lib/reconSettings/registry')
+    const expected = field('roeForbiddenTools')?.values ?? []
+    expect(expected.length).toBeGreaterThan(0)
+
+    const { container } = renderSection({ roeForbiddenTools: [], roeForbiddenCategories: [] })
+    const offered = [...container.querySelectorAll('code')]
+      .map(el => el.textContent ?? '')
+      .filter(text => expected.includes(text))
+    expect([...new Set(offered)].sort()).toEqual([...expected].sort())
+  })
+
+  test('there is no free-text box that could produce an unenforceable name', () => {
+    const { container } = renderSection()
+    const placeholders = [...container.querySelectorAll('input[type="text"]')]
+      .map(el => (el as HTMLInputElement).placeholder)
+    expect(placeholders.join(' ')).not.toMatch(/execute_sqlmap/)
+  })
+
+  test('ticking a tool writes that exact name and nothing else', () => {
+    const { updateField, container } = renderSection({ roeForbiddenTools: [] })
+    const box = [...container.querySelectorAll('label')]
+      .find(l => l.querySelector('code')?.textContent === 'execute_hydra')
+      ?.querySelector('input')
+    expect(box).toBeTruthy()
+    fireEvent.click(box!)
+    expect(updateField).toHaveBeenCalledWith('roeForbiddenTools', ['execute_hydra'])
+  })
+
+  test('every category offered is a key the gate can expand', () => {
+    // The UI used to offer `physical` with no matching CATEGORY_TOOL_MAP entry.
+    // Whatever the set is, it must come from the registry rather than a literal
+    // here, so the form and the validator cannot disagree.
+    const { container } = renderSection({ roeForbiddenCategories: [] })
+    const text = container.textContent ?? ''
+    for (const label of ['Credential testing', 'Availability testing', 'Social engineering']) {
+      expect(text).toContain(label)
+    }
   })
 })

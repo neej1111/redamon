@@ -2122,7 +2122,7 @@ class TestRunHttpx(unittest.TestCase):
         cypher_text = " ".join(cypher_calls)
         self.assertIn("MERGE (s:Subdomain", cypher_text)
         self.assertIn("MERGE (i:IP", cypher_text)
-        self.assertIn("MERGE (s)-[:RESOLVES_TO", cypher_text)
+        self.assertIn("MERGE (s)-[r:RESOLVES_TO]->(i)", cypher_text)
 
     # --- user_targets edge cases ---
 
@@ -3753,18 +3753,30 @@ class TestRunSupplyChain(unittest.TestCase):
         })
         self.assertTrue(m["run_supply_chain"].called)
 
+    def test_out_of_scope_graph_urls_are_dropped_and_scope_is_passed_on(self):
+        m = self._run_with_mocks(
+            {"domain": "example.com", "include_graph_targets": True},
+            graph_baseurls=[{"url": "https://example.com"}, {"url": "https://api.payments-vendor.test"}],
+        )
+        combined = m["run_js_recon"].call_args[0][0]
+        self.assertEqual(combined["resource_enum"]["discovered_urls"], ["https://example.com"])
+        self.assertEqual(combined["subdomains"], ["example.com"])
+
 
 class TestRunJsRecon(unittest.TestCase):
     """Tests for run_jsrecon using module-level mocks."""
 
-    def _run_with_mocks(self, config, neo4j_connected=True, graph_endpoints=None, graph_baseurls=None):
+    def _run_with_mocks(self, config, neo4j_connected=True, graph_endpoints=None, graph_baseurls=None,
+                        graph_subdomains=None, settings_override=None):
         """Helper that sets up all mocks and runs run_jsrecon."""
         mock_settings = MagicMock()
         mock_settings.return_value = {
             "JS_RECON_ENABLED": True, "JS_RECON_MAX_FILES": 500,
             "JS_RECON_TIMEOUT": 900, "JS_RECON_CONCURRENCY": 10,
             "JS_RECON_VALIDATE_KEYS": True,
-            "SUBDOMAIN_LIST": ["."],}
+            "SUBDOMAIN_LIST": ["."],
+            **(settings_override or {}),
+        }
 
         # Mock run_js_recon: mutates combined_result by adding 'js_recon' key
         def mock_js_recon_fn(combined_result, settings=None):
@@ -3799,7 +3811,7 @@ class TestRunJsRecon(unittest.TestCase):
         _graph_baseurls = graph_baseurls if graph_baseurls is not None else [
             {"url": "https://example.com"},
         ]
-        _graph_subdomains = ["www.example.com"]
+        _graph_subdomains = graph_subdomains if graph_subdomains is not None else ["www.example.com"]
 
         def mock_session_run(query, **kwargs):
             result = MagicMock()
@@ -3992,6 +4004,82 @@ class TestRunJsRecon(unittest.TestCase):
         self.assertIn("dns", combined_result)
         self.assertIn("metadata", combined_result)
         self.assertEqual(combined_result["metadata"]["project_id"], "proj1")
+
+    def test_out_of_scope_graph_urls_are_not_fetched(self):
+        # An Endpoint written before JS recon enforced scope can carry a
+        # third-party baseurl; re-fetching it would be an out-of-scope request.
+        mocks = self._run_with_mocks(
+            {"domain": "example.com", "user_inputs": []},
+            graph_endpoints=[
+                {"url": "https://example.com/js/app.js"},
+                {"url": "https://api.payments-vendor.test/v1/charges"},
+            ],
+        )
+        discovered = mocks["run_js_recon"].call_args[0][0]["resource_enum"]["discovered_urls"]
+        self.assertIn("https://example.com/js/app.js", discovered)
+        self.assertNotIn("https://api.payments-vendor.test/v1/charges", discovered)
+
+    def test_graph_write_scope_holds_graph_subdomains_and_user_url_hosts(self):
+        mocks = self._run_with_mocks({
+            "domain": "example.com", "user_inputs": [],
+            "user_targets": {"urls": ["https://shop.partner.test/app.js"], "url_attach_to": None},
+        })
+        written = mocks["neo4j_client"].update_graph_from_js_recon.call_args.kwargs["recon_data"]
+        # The typed URL is kept (as web_crawling keeps it) and so is its host;
+        # without a top-level list the scope collapses to the apex alone.
+        self.assertEqual(written["subdomains"],
+                         ["example.com", "shop.partner.test", "www.example.com"])
+
+    def test_ip_mode_scope_is_the_target_ip_not_the_placeholder_subdomain(self):
+        mocks = self._run_with_mocks(
+            {"domain": "ip-targets.proj1", "user_inputs": []},
+            graph_endpoints=[{"url": "http://192.88.97.10/static/app.js"},
+                             {"url": "http://192.88.97.20/api/x"}],
+            graph_baseurls=[{"url": "http://192.88.97.10"}],
+            graph_subdomains=["192-88-97-10"],
+            settings_override={"IP_MODE": True, "TARGET_IPS": ["192.88.97.10"]},
+        )
+        combined = mocks["run_js_recon"].call_args[0][0]
+        self.assertEqual(combined["subdomains"], ["192.88.97.10"])
+        self.assertNotIn("http://192.88.97.20/api/x", combined["resource_enum"]["discovered_urls"])
+
+
+class TestScopePartialUrls(unittest.TestCase):
+    """_scope_partial_urls: the partial-recon half of the JS endpoint scope."""
+
+    def _scope(self, graph_urls, user_urls=(), graph_subdomains=(), settings=None,
+               domain="example.com"):
+        from recon.partial_recon_modules.helpers import _scope_partial_urls
+        return _scope_partial_urls(list(graph_urls), list(user_urls), list(graph_subdomains),
+                                   settings or {"SUBDOMAIN_LIST": ["."]}, domain)
+
+    def test_drops_foreign_graph_urls_keeps_user_urls_and_dedups(self):
+        urls, hosts = self._scope(
+            ["https://example.com/a.js", "https://cdn.vendor.test/b.js", "https://example.com/a.js"],
+            user_urls=["https://elsewhere.test/c.js", "https://example.com/a.js"],
+        )
+        self.assertEqual(urls, ["https://example.com/a.js", "https://elsewhere.test/c.js"])
+        self.assertEqual(hosts, ["elsewhere.test", "example.com"])
+
+    def test_apex_needs_include_root_domain(self):
+        urls, hosts = self._scope(["https://example.com/a.js", "https://api.example.com/b.js"],
+                                  settings={"SUBDOMAIN_LIST": []})
+        self.assertEqual(urls, ["https://api.example.com/b.js"])
+        self.assertEqual(hosts, ["api.example.com"])
+
+    def test_only_in_scope_graph_subdomains_join_the_scope(self):
+        _, hosts = self._scope([], graph_subdomains=["www.example.com", "evil.test"])
+        self.assertEqual(hosts, ["www.example.com"])
+
+    def test_ip_mode_uses_target_ips(self):
+        urls, hosts = self._scope(
+            ["http://192.88.97.10/app.js", "http://192.88.97.20/app.js"],
+            graph_subdomains=["192-88-97-10"],
+            settings={"IP_MODE": True, "TARGET_IPS": ["192.88.97.10"]},
+            domain="ip-targets.p1",
+        )
+        self.assertEqual(urls, ["http://192.88.97.10/app.js"])
+        self.assertEqual(hosts, ["192.88.97.10"])
 
 
 class TestRunShodan(unittest.TestCase):

@@ -1,6 +1,8 @@
 /* Settings page layout */
+/* Sized so the content box ends exactly where the last tab (System) ends;
+   adding a tab means re-measuring this. */
 .page {
-  width: 900px;
+  width: 1084px;
   max-width: 100%;
   margin: 0 auto;
   padding: var(--space-6) var(--space-4);

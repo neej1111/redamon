@@ -34,6 +34,17 @@ services:
         REDAMON_VERSION: "${REDAMON_VERSION:-0.0.0}"
     environment:
       NODE_ENV: "${WEBAPP_NODE_ENV:-production}"      # enables the Secure-cookie patch
+      # THIS is the behind-nginx deploy requestMeta.ts documents. nginx pins
+      # X-Forwarded-For to the real peer (snippets/proxy-common.conf), so the
+      # forwarded IP is trustworthy here and nowhere else. Without it every
+      # request looks like 127.0.0.1: the per-IP login lockout key is never
+      # created, and every audit row records an untrusted loopback address.
+      TRUST_PROXY: "true"
+      # The origin a browser would send, port included. nginx forwards
+      # `Host $$host`, which DROPS the port, so on a non-443/80 deploy the
+      # webapp cannot reconstruct its own origin and would reject a same-origin
+      # client as cross-origin. Seeded by deploy.sh from ACCESS_MODE + port.
+      MCP_ALLOWED_ORIGIN: "${MCP_ALLOWED_ORIGIN:-}"
 
   agent:
     ports: !override
@@ -51,9 +62,9 @@ services:
       - "127.0.0.1:${MCP_METASPLOIT_PORT:-8003}:8003"
       - "127.0.0.1:${MCP_NMAP_PORT:-8004}:8004"
       - "127.0.0.1:${MCP_PLAYWRIGHT_PORT:-8005}:8005"
-      - "127.0.0.1:8013:8013"
-      - "127.0.0.1:8014:8014"
+      - "127.0.0.1:${MSF_PROGRESS_HOST_PORT:-8013}:8013"
+      - "127.0.0.1:${HYDRA_PROGRESS_HOST_PORT:-8014}:8014"
       - "127.0.0.1:4444:4444"                          # loopback by default; ufw-open per engagement
-      - "127.0.0.1:4040:4040"
+      - "127.0.0.1:${NGROK_API_HOST_PORT:-4040}:4040"
       - "127.0.0.1:8015:8015"
       - "127.0.0.1:8016:8016"

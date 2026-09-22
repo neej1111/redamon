@@ -159,19 +159,38 @@ def test_fetch_project_settings_mapping_present_in_python_source():
 
 def test_recon_orchestrator_runtime_only_keys_excludes_ai_toggles():
     """RUNTIME_ONLY_KEYS is the gate that strips a key out of /defaults.
-    Our 9 AI toggles MUST NOT appear in it — otherwise the operator never
-    sees them in the project form."""
-    content = _read("recon_orchestrator/api.py")
-    # Locate the RUNTIME_ONLY_KEYS literal block. It's bounded by '{' and the
-    # closing '}' that immediately precedes the camel_case_defaults dict.
-    start = content.find("RUNTIME_ONLY_KEYS = {")
-    assert start != -1, "RUNTIME_ONLY_KEYS literal not found in recon_orchestrator/api.py"
-    end = content.find("}", start)
-    block = content[start:end]
+    Our 9 AI toggles MUST NOT appear in it - otherwise the operator never
+    sees them in the project form.
+
+    The list is DERIVED from the recon settings registry now rather than written
+    out in api.py, so this evaluates the same query the endpoint runs instead of
+    grepping a source literal. Better: a grep passed whenever the literal moved,
+    and this fails if the derivation ever starts excluding a toggle.
+    """
+    from recon import settings_registry as reg
+
+    excluded = set(reg.runtime_only()) | {
+        "USER_ID", "TARGET_DOMAIN", "DOMAIN_BATCH_MODE", "DOMAIN_BATCH_GROUPS",
+    }
     for snake, _camel, _sql in AI_TOGGLES:
-        assert snake not in block, (
-            f"{snake!r} accidentally landed in RUNTIME_ONLY_KEYS — it will be stripped "
-            f"from /defaults and the operator won't see the toggle."
+        assert snake not in excluded, (
+            f"{snake!r} is excluded from /defaults - it will be stripped and the "
+            f"operator will not see the toggle."
+        )
+
+
+def test_every_ai_toggle_reaches_the_defaults_payload():
+    """The positive half: each toggle is a real column that /defaults will send."""
+    from recon import settings_registry as reg
+    from recon.project_settings import DEFAULT_SETTINGS
+
+    by_key = reg.by_runtime_key()
+    for snake, camel, _sql in AI_TOGGLES:
+        assert snake in DEFAULT_SETTINGS, f"{snake} has no default"
+        entry = by_key.get(snake)
+        assert entry is not None, f"{snake} has no registry entry"
+        assert entry["column"] == camel, (
+            f"{snake} maps to column {entry['column']!r}, the toggle expects {camel!r}"
         )
 
 

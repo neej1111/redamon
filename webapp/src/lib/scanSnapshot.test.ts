@@ -43,6 +43,7 @@ import {
   defaultVersionLabel,
   ensureCurrentVersion,
   withSnapshotSlot,
+  tryWithSnapshotSlot,
   SESSION_LABELS,
   SnapshotTooLargeError,
   snapshotMaxBytes,
@@ -434,5 +435,69 @@ describe('withSnapshotSlot (F5 concurrency cap)', () => {
     // A subsequent acquisition must not deadlock.
     await expect(withSnapshotSlot(async () => 'ok')).resolves.toBe('ok')
     delete process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY
+  })
+})
+
+describe('tryWithSnapshotSlot (the non-blocking acquire)', () => {
+  afterEach(() => { delete process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY })
+
+  test('runs the body and returns its value when a slot is free', async () => {
+    process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY = '1'
+    expect(await tryWithSnapshotSlot(async () => 'captured'))
+      .toEqual({ acquired: true, value: 'captured' })
+  })
+
+  test('REFUSES rather than queueing, and never calls the body', async () => {
+    // The whole point. Queueing a caller that can give up leaves an abandoned
+    // waiter that is woken later and runs a full graph capture nobody awaits,
+    // holding a slot the UI and activation paths need.
+    process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY = '1'
+    let release!: () => void
+    const held = new Promise<void>(r => { release = r })
+    const holder = withSnapshotSlot(() => held)
+    await Promise.resolve()
+
+    const ran = vi.fn()
+    expect(await tryWithSnapshotSlot(async () => ran())).toEqual({ acquired: false })
+    expect(ran).not.toHaveBeenCalled()
+
+    release()
+    await holder
+  })
+
+  test('a refusal does not consume or leak a slot', async () => {
+    process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY = '1'
+    let release!: () => void
+    const held = new Promise<void>(r => { release = r })
+    const holder = withSnapshotSlot(() => held)
+    await Promise.resolve()
+    await tryWithSnapshotSlot(async () => 'never')
+    release()
+    await holder
+
+    expect(await tryWithSnapshotSlot(async () => 'ok')).toEqual({ acquired: true, value: 'ok' })
+  })
+
+  test('releases the slot when the body throws', async () => {
+    process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY = '1'
+    await expect(tryWithSnapshotSlot(async () => { throw new Error('boom') })).rejects.toThrow('boom')
+    expect(await tryWithSnapshotSlot(async () => 'ok')).toEqual({ acquired: true, value: 'ok' })
+  })
+
+  test('it does not starve a blocking waiter that is already queued', async () => {
+    // The blocking variant stays the right tool for the UI, so releasing a
+    // try-slot has to hand off to anyone waiting, exactly as withSnapshotSlot does.
+    process.env.SCAN_SNAPSHOT_MAX_CONCURRENCY = '1'
+    let release!: () => void
+    const held = new Promise<void>(r => { release = r })
+    const holder = withSnapshotSlot(() => held)
+    await Promise.resolve()
+
+    const waiterRan = vi.fn()
+    const waiter = withSnapshotSlot(async () => waiterRan())
+    release()
+    await holder
+    await waiter
+    expect(waiterRan).toHaveBeenCalledOnce()
   })
 })

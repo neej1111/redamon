@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fail2ban.sh -- sshd + nginx jails (§10). Repointed from the example: the Django
 # [django-auth] jail is dropped (no such log here). Reads ENABLE_FAIL2BAN. Requires
-# _common.sh.
+# _common.sh. Also reads MCP_SERVER_ENABLED (adds the MCP auth jail).
 
 setup_fail2ban() {
   if ! is_true "${ENABLE_FAIL2BAN:-true}"; then
@@ -9,6 +9,8 @@ setup_fail2ban() {
     return 0
   fi
   step "fail2ban (sshd + nginx jails)"
+  local _MCP_JAIL_ENABLED=false
+  is_true "${MCP_SERVER_ENABLED:-false}" && _MCP_JAIL_ENABLED=true
   install_if_missing fail2ban
   run_sudo mkdir -p /etc/fail2ban/jail.d
 
@@ -56,7 +58,38 @@ logpath  = /var/log/nginx/error.log
 maxretry = 10
 findtime = 60
 bantime  = 600
+
+# Repeated MCP auth failures. This is the threshold signal for a token brute
+# force or a replayed revoked token, and it is deliberately SEPARATE from
+# nginx-limit-req: that jail bans on RATE, which an MCP client legitimately
+# trips while bursting, whereas eleven 401s in two minutes is never legitimate.
+# The MCP location sets \`limit_req_log_level warn\`, so its rate-limit lines no
+# longer reach the [error]-anchored nginx-limit-req filter at all.
+[redamon-mcp-auth]
+enabled  = ${_MCP_JAIL_ENABLED}
+port     = http,https
+filter   = redamon-mcp-auth
+logpath  = /var/log/nginx/access.log
+maxretry = 10
+findtime = 120
+bantime  = 1800
 F2B
+
+  # The filter the jail above references. 401 is the ONLY code matched: the route
+  # returns 401 for every credential failure (missing, invalid, revoked, expired)
+  # and distinct codes for everything else, so this cannot fire on a healthy
+  # client that is merely rate-limited (429) or on a disabled server (404).
+  #
+  # The path is bounded by ` HTTP/` or a query string rather than left open, so
+  # it matches this endpoint and not everything sharing its prefix: an open
+  # `[^"]*` tail would also ban on a 401 from a future /api/mcp-server-<x>
+  # route. tests/deploy_mcp_fail2ban_test.sh runs the corpus this was tuned on.
+  cat <<'F2BFILTER' | run_sudo_tee /etc/fail2ban/filter.d/redamon-mcp-auth.conf
+# RedAmon: repeated credential failures against the inbound MCP endpoint.
+[Definition]
+failregex = ^<HOST> .* "(?:POST|GET) /api/mcp-server(?:\?[^"]*)? HTTP/[^"]+" 401
+ignoreregex =
+F2BFILTER
 
   run_sudo touch /var/log/auth.log 2>/dev/null || true
   run_sudo systemctl enable fail2ban >/dev/null 2>&1 || true

@@ -64,12 +64,21 @@ graph-write rules it depends on.
   Every read and write carries `user_id`/`project_id`; agent-facing queries go
   through `scope_query`, never `inject_tenant_filter` alone.
 - **ALWAYS reuse an existing node label before inventing one.** Discovered
-  hostnames are `Subdomain`, not a new label. Check [docs/readmes/GRAPH.SCHEMA.md](../../docs/readmes/GRAPH.SCHEMA.md) first.
-- **ALWAYS sync the schema when you add a label / relationship / property.** Update
-  [docs/readmes/GRAPH.SCHEMA.md](../../docs/readmes/GRAPH.SCHEMA.md), the `TEXT_TO_CYPHER_SYSTEM`
-  prompt at [agentic/prompts/base.py:1451](../../agentic/prompts/base.py#L1451)
-  (or the agent generates wrong Cypher and cannot see the new data), and
-  `NODE_COLORS` in [webapp/src/app/graph/config/colors.ts](../../webapp/src/app/graph/config/colors.ts).
+  hostnames are `Subdomain`, not a new label. Check
+  [graph_db/schema_sections.md](../../graph_db/schema_sections.md) first - that
+  is the single declaration of every label, property and relationship.
+- **ALWAYS declare a new label / relationship / property in ONE place**:
+  [graph_db/schema_sections.md](../../graph_db/schema_sections.md), then re-seed
+  with `python3 tooling/scripts/seed_schema_catalog.py`. A uniqueness key also
+  goes in [graph_db/schema_keys.py](../../graph_db/schema_keys.py), from which
+  `schema.py` renders its `CREATE CONSTRAINT` statements.
+  Do NOT copy the schema into the prompt or into GRAPH.SCHEMA.md: the prompt
+  splices the catalog in at `__GRAPH_SCHEMA__`, and GRAPH.SCHEMA.md deliberately
+  no longer lists labels at all. Three copies is what drifted, and four tests
+  now fail if you make a fourth.
+  Still update `NODE_COLORS` in
+  [webapp/src/app/graph/config/colors.ts](../../webapp/src/app/graph/config/colors.ts),
+  which is presentation, not schema.
 
 ---
 
@@ -103,6 +112,8 @@ Copied from [graph_db/mixins/graphql_mixin.py](../../graph_db/mixins/graphql_mix
 
 ## Resources
 
-- [docs/readmes/GRAPH.SCHEMA.md](../../docs/readmes/GRAPH.SCHEMA.md) - canonical node/relationship schema and MERGE keys
+- [graph_db/schema_sections.md](../../graph_db/schema_sections.md) - THE declaration: every label, property and relationship
+- [graph_db/schema_keys.py](../../graph_db/schema_keys.py) - each label's uniqueness key; schema.py renders its constraints from it
+- [docs/readmes/GRAPH.SCHEMA.md](../../docs/readmes/GRAPH.SCHEMA.md) - the rationale: design principles, tenancy strategy, the Muted label. No longer lists labels
 - [graph_db/neo4j_client.py](../../graph_db/neo4j_client.py) - the mixin MRO (do not edit; edit a mixin)
 - Related skill: `recon-tool-integration`

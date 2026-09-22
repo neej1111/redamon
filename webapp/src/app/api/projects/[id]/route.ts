@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { archiveProjectAuthorizations } from '@/lib/engagementArchive'
 import prisma from '@/lib/prisma'
 import type { Prisma } from '@prisma/client'
 import { unlink } from 'fs/promises'
@@ -135,7 +136,20 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // Remove fields that shouldn't be updated directly. authProfile comes back in
     // the whole-row PUT the form sends; it is a relation written only by its own
     // route, and passing it here would make Prisma reject the update.
-    const { userId, createdAt, updatedAt, user, authProfile: _authProfile, ...updateData } = body
+    //
+    // roeEnabled is DERIVED from whether any engagement limit is set, and
+    // nothing writes it. The form no longer sends it, but this route takes the
+    // whole row, so without this line an older client - or a saved bundle
+    // replayed through it - would persist a value that disagrees with the
+    // derivation. A column nothing reads but something writes is the residue
+    // the derivation exists to remove, so it is dropped here rather than
+    // trusted not to arrive.
+    const {
+      userId, createdAt, updatedAt, user,
+      authProfile: _authProfile,
+      roeEnabled: _roeEnabledDerived,
+      ...updateData
+    } = body
 
     // Sanitize string inputs that are used as hostnames/IPs (trailing spaces break DNS)
     if (typeof updateData.targetDomain === 'string') {
@@ -374,6 +388,28 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       // its project row already gone. stop-all loops the nested state dict.
       orchestratorFetch(`${RECON_ORCHESTRATOR_URL}/trufflehog/${id}/stop-all`, { method: 'POST' }),
     ])
+
+    // Archive the authorization records BEFORE the delete. Every other Project
+    // child cascades; these do not, because the record of what authorized a
+    // project is the thing an incident review needs most and deleting the
+    // project is exactly when it stops being recoverable. The foreign key is
+    // `Restrict`, so a failed archive fails the delete rather than quietly
+    // taking the records with it.
+    const archived = await archiveProjectAuthorizations(id)
+    if (archived.error) {
+      return NextResponse.json(
+        {
+          error:
+            'Could not archive this project\'s engagement authorization records, so it was ' +
+            'not deleted. The record of what authorized an engagement must outlive the ' +
+            'engagement. Retry, or contact an administrator.',
+        },
+        { status: 500 }
+      )
+    }
+    if (archived.archived > 0) {
+      console.log(`[project-delete] archived ${archived.archived} authorization record(s) for ${id}`)
+    }
 
     // 1. Delete project from PostgreSQL (cascades captured_http_transactions +
     //    job_queue rows)

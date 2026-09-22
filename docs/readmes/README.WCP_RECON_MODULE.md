@@ -523,7 +523,7 @@ Persisted properties: `source`, `vulnerability_type="web_cache_poisoning"`, `nam
 `cross_vantage`, `evidence` (JSON), and hoisted `poc_link` / `curl_verify`. A
 `_check_unknown_keys` contract guard logs if the scanner ever emits a field the mixin
 doesn't map (data-loss tripwire). The NL-to-Cypher prompt (`agentic/prompts/base.py`)
-and `docs/readmes/GRAPH.SCHEMA.md` document the `cache_poisoning` source.
+and `graph_db/schema_sections.md` document the `cache_poisoning` source.
 
 Example Cypher (what the AI agent can run):
 ```cypher

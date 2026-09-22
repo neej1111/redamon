@@ -224,6 +224,12 @@ def cmd_ask(args, user_id: str, project_id: str) -> int:
 
     agent_url = os.environ.get("REDAMON_AGENT_URL", "http://agent:8080").rstrip("/")
     question = " ".join(args.question) if isinstance(args.question, list) else args.question
+    # /text-to-cypher is a BILLED endpoint and now requires internal auth, like
+    # /graph/exec above. Without this header `ask` returns 401 (mcp_plan P0-3).
+    headers = {}
+    scanner_key = os.environ.get("SCANNER_API_KEY", "").strip()
+    if scanner_key:
+        headers["X-Internal-Key"] = scanner_key
     try:
         resp = requests.post(
             f"{agent_url}/text-to-cypher",
@@ -235,6 +241,7 @@ def cmd_ask(args, user_id: str, project_id: str) -> int:
                 # question like "subdomain names only" yields RETURN s.name.
                 "for_graph_view": False,
             },
+            headers=headers,
             timeout=120,
         )
     except requests.RequestException as e:

@@ -283,3 +283,7 @@ testing/guinea_pigs/supply_chain_target/.dryrun/
 
 # Kilo agent state (extension uninstalled 2026-09)
 .kilo/
+
+# RoE end-to-end validation corpus (local only: 40 disclosure-policy docs and
+# their run artifacts; not part of the shipped app or the test gate)
+/e2e_roe/

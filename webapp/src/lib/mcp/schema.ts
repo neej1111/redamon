@@ -16,8 +16,11 @@ export type Transport = (typeof TRANSPORTS)[number]
 
 /** Tool names reserved by built-in / system tools - user MCP tools must not use these. */
 export const BUILTIN_RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set([
-  // Built-in (Python) tools
-  'query_graph', 'web_search', 'cve_intel', 'shodan', 'google_dork',
+  // Built-in (Python) tools. graph_summary and graph_schema ship on BOTH the
+  // agent and the inbound MCP server from one definition; omitting them here
+  // let a user-registered plugin shadow a built-in graph tool with its own.
+  'query_graph', 'graph_summary', 'graph_schema',
+  'web_search', 'cve_intel', 'shodan', 'google_dork',
   'execute_code', 'tradecraft_lookup',
   // System MCP-backed tools (the 5 baseline kali-sandbox servers)
   'execute_curl', 'execute_naabu', 'execute_httpx', 'execute_subfinder',

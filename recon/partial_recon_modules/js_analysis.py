@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from recon.partial_recon_modules.helpers import _is_valid_url
+from recon.partial_recon_modules.helpers import _is_valid_url, _scope_partial_urls
 
 
 def run_jsrecon(config: dict) -> None:
@@ -71,6 +71,7 @@ def run_jsrecon(config: dict) -> None:
     # Build target URLs from Neo4j graph (or start empty if user unchecked graph targets)
     include_graph = config.get("include_graph_targets", True)
     target_urls = []
+    graph_subdomains = []
 
     if include_graph:
         print(f"[*][Partial Recon] Querying graph for targets (BaseURLs + Endpoints)...")
@@ -105,18 +106,29 @@ def run_jsrecon(config: dict) -> None:
                         if url and url not in target_urls:
                             target_urls.append(url)
 
+                    result = session.run(
+                        """
+                        MATCH (d:Domain {name: $domain, user_id: $uid, project_id: $pid})
+                              -[:HAS_SUBDOMAIN]->(s:Subdomain)
+                        RETURN collect(DISTINCT s.name) AS subdomains
+                        """,
+                        domain=domain, uid=user_id, pid=project_id,
+                    )
+                    record = result.single()
+                    if record:
+                        graph_subdomains = record["subdomains"] or []
+
                 print(f"[+][Partial Recon] Found {len(target_urls)} URLs from graph")
             else:
                 print("[!][Partial Recon] Neo4j not reachable, cannot fetch graph inputs")
     else:
         print(f"[*][Partial Recon] Skipping graph targets (user opted out)")
 
-    # Add user-provided URLs to target list
     if user_urls:
         print(f"[*][Partial Recon] Adding {len(user_urls)} user-provided URLs")
-        for url in user_urls:
-            if url not in target_urls:
-                target_urls.append(url)
+    target_urls, scope_hosts = _scope_partial_urls(
+        target_urls, user_urls, graph_subdomains, settings, domain,
+    )
 
     # Check for uploaded JS files (they're loaded by run_js_recon internally)
     has_uploaded_files = False
@@ -138,32 +150,11 @@ def run_jsrecon(config: dict) -> None:
     # It reads from resource_enum.discovered_urls and http_probe.by_url
     # We populate discovered_urls with all our target URLs
     # and http_probe.by_url as an empty dict (no live probe data in partial mode)
-    subdomains = []
-    if include_graph:
-        try:
-            from graph_db import Neo4jClient
-            with Neo4jClient() as graph_client:
-                if graph_client.verify_connection():
-                    driver = graph_client.driver
-                    with driver.session() as session:
-                        result = session.run(
-                            """
-                            MATCH (d:Domain {name: $domain, user_id: $uid, project_id: $pid})
-                                  -[:HAS_SUBDOMAIN]->(s:Subdomain)
-                            RETURN collect(DISTINCT s.name) AS subdomains
-                            """,
-                            domain=domain, uid=user_id, pid=project_id,
-                        )
-                        record = result.single()
-                        if record:
-                            subdomains = record["subdomains"] or []
-        except Exception:
-            pass
-
     combined_result = {
         "domain": domain,
+        "subdomains": scope_hosts,
         "dns": {
-            "subdomains": [{"subdomain": s, "source": "graph"} for s in subdomains],
+            "subdomains": [{"subdomain": s, "source": "graph"} for s in graph_subdomains],
         },
         "resource_enum": {
             "discovered_urls": target_urls,

@@ -83,7 +83,7 @@ import { SavePresetModal } from './SavePresetModal'
 import { UserPresetDrawer } from './UserPresetDrawer'
 import { getPresetById, type ReconPreset } from '@/lib/recon-presets'
 import { resolveIpModeForPreset } from '@/lib/recon-presets/targeting'
-import { PRESET_EXCLUDED_FIELDS } from '@/lib/project-preset-utils'
+import { PRESET_EXCLUDED_FIELDS, stripExcludedOnApply } from '@/lib/project-preset-utils'
 
 const WorkflowView = dynamic(
   () => import('./WorkflowView/WorkflowView').then(m => ({ default: m.WorkflowView })),
@@ -220,6 +220,31 @@ async function fetchDefaults(): Promise<Partial<ProjectFormData>> {
   }
 }
 
+/**
+ * Strip the DERIVED engagement flag out of anything on its way into `formData`.
+ *
+ * `roeEnabled` is computed from whether any engagement limit is set, and nothing
+ * writes it. It has to be kept out of the form's data for two separate reasons,
+ * and only the first is obvious:
+ *
+ *  1. `useDirtyState(formData)` compares against a baseline, so a value the form
+ *     derives rather than the user edits would make the form permanently dirty
+ *     and fire the unsaved-changes guard on every navigation.
+ *  2. The form SUBMITS `formData` wholesale. A project row loaded in edit mode
+ *     spreads every scalar, so without this the form would read the stale
+ *     column and write it straight back - leaving a stored value that disagrees
+ *     with the derivation, which is the two-sources-of-truth state the
+ *     derivation exists to end.
+ *
+ * TargetSection computes the value for display from the limits themselves.
+ */
+function withoutDerived<T extends Record<string, unknown>>(row: T | undefined): T {
+  if (!row) return {} as T
+  const clone = { ...row }
+  delete clone.roeEnabled
+  return clone as T
+}
+
 export function ProjectForm({
   initialData,
   onSubmit,
@@ -240,7 +265,7 @@ export function ProjectForm({
   const [isLoadingDefaults, setIsLoadingDefaults] = useState(mode === 'create')
   const [formData, setFormData] = useState<ProjectFormData>(() => ({
     ...MINIMAL_DEFAULTS,
-    ...initialData
+    ...withoutDerived(initialData as Record<string, unknown>),
   } as ProjectFormData))
 
   // Dirty tracking: baseline = the last saved/loaded formData. Edit mode adopts
@@ -420,13 +445,13 @@ export function ProjectForm({
       const seeded = seedInitialModels(user)
       let loaded: ProjectFormData | null = null
       setFormData(prev => {
-        loaded = {
+        loaded = withoutDerived({
           ...defaults,
           ...prev,
           ...initialData,
           agentOpenaiModel: seeded.agentOpenaiModel,
           aiPipelineModel: seeded.aiPipelineModel,
-        } as ProjectFormData
+        }) as ProjectFormData
         return loaded
       })
       // Adopt the post-load value as the dirty baseline so freshly-loaded
@@ -538,12 +563,12 @@ export function ProjectForm({
       // Apply ONLY this preset's settings (all keys here are valid Project columns).
       Object.assign(next, preset.parameters)
       // A preset defines recon-tool config ONLY. Resetting to defaults must NOT reset
-      // things presets never own: target identity/files (PRESET_EXCLUDED_FIELDS), the
-      // user's LLM model choice, or RoE scope/client info (a safety boundary).
+      // things presets never own: target identity and files, the engagement's limits
+      // and its record, or the user's LLM model choice. PRESET_EXCLUDED_FIELDS is a
+      // registry query for the engagement half, so reclassifying a field moves this
+      // boundary with it - the `key.startsWith('roe')` loop that used to sit here was
+      // a string match on a column NAME, and those names outlived their meaning.
       for (const key of PRESET_EXCLUDED_FIELDS) next[key] = p[key]
-      for (const key of Object.keys(p)) {
-        if (key.startsWith('roe')) next[key] = p[key]
-      }
       next.agentOpenaiModel = p.agentOpenaiModel
       next.aiPipelineModel = p.aiPipelineModel
       // Drive Start-from-IP from the preset's declared target type. ipMode is a
@@ -571,11 +596,18 @@ export function ProjectForm({
     // Only apply keys that already exist in the form: the merged settings can carry
     // backend-default keys that aren't Project columns (e.g. takeoverCnameValidationEnabled),
     // which would make the project update fail. reconPresetId is kept (handled below).
+    //
+    // stripExcludedOnApply is the half that protects the presets people ALREADY
+    // saved. Until this shipped, a user preset captured 37 engagement columns -
+    // every limit and the client's contact details - and this handler applied any
+    // of them that existed in the form, so loading a preset from project A
+    // overwrote project B's rate ceiling and exclusion list with A's.
+    const safe = stripExcludedOnApply(settings)
     setFormData(prev => {
       const p = prev as Record<string, unknown>
       const next: Record<string, unknown> = { ...p }
-      for (const key of Object.keys(settings)) {
-        if (key in p) next[key] = settings[key]
+      for (const key of Object.keys(safe)) {
+        if (key in p) next[key] = safe[key]
       }
       return next as ProjectFormData
     })

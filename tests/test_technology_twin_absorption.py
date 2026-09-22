@@ -6,6 +6,9 @@ that twin. The absorb re-parented USES_TECHNOLOGY and then DETACH DELETEd, so
 every OTHER edge on the twin went with it — and the port scan, which reports
 versionless services, normally runs BEFORE the HTTP probe that supplies a
 version, so the twin usually does hold `(Port)-[:HAS_TECHNOLOGY]->` by then.
+A moved edge must also keep its properties: clear_gvm_data decides by
+`detected_by` on the edge. tests/test_technology_identity_graph_live.py proves
+the same against a real database.
 
 Run: python -m unittest tests.test_technology_twin_absorption
 """
@@ -45,6 +48,8 @@ class FakeSession:
 
     def run(self, query, **kwargs):
         self.queries.append((query, kwargs))
+        if "AS old_id" in query:
+            return FakeResult({"old_id": "4:db:1", "new_id": "4:db:2"})
         if "AS absorbed" in query:
             return FakeResult({"absorbed": self.absorbed})
         if "AS types" in query:
@@ -64,27 +69,37 @@ class TestEveryRelationshipMoves(unittest.TestCase):
     def test_the_inventory_covers_every_type_a_technology_can_carry(self):
         self.assertEqual(
             {rel for rel, _ in _TECH_TWIN_RELATIONSHIPS},
-            {"USES_TECHNOLOGY", "HAS_TECHNOLOGY", "HAS_KNOWN_CVE", "HAS_VULNERABILITY"},
+            {"USES_TECHNOLOGY", "HAS_TECHNOLOGY", "FOUND_ON", "FINDING_AFFECTS_TECH",
+             "STEP_IDENTIFIED", "HAS_KNOWN_CVE", "HAS_VULNERABILITY"},
         )
 
     def test_each_type_gets_its_own_reparenting_query(self):
         session, _ = _absorb()
         joined = "\n".join(q for q, _ in session.queries)
         for rel, _direction in _TECH_TWIN_RELATIONSHIPS:
-            self.assertIn(f"[:`{rel}`]", joined, f"{rel} is never moved")
+            self.assertIn(f"[n:`{rel}`]", joined, f"{rel} is never moved")
 
     def test_direction_is_respected(self):
         # An inbound edge re-created outbound would reverse the graph.
         session, _ = _absorb()
         joined = "\n".join(q for q, _ in session.queries)
-        self.assertIn("(other)-[:`HAS_TECHNOLOGY`]->(new)", joined)
-        self.assertIn("(new)-[:`HAS_KNOWN_CVE`]->(other)", joined)
+        self.assertIn("CREATE (other)-[n:`HAS_TECHNOLOGY`]->(new)", joined)
+        self.assertIn("CREATE (new)-[n:`HAS_KNOWN_CVE`]->(other)", joined)
+
+    def test_a_moved_edge_keeps_its_properties(self):
+        session, _ = _absorb()
+        moves = [q for q, _ in session.queries if "CREATE (" in q]
+        self.assertEqual(len(moves), len(_TECH_TWIN_RELATIONSHIPS))
+        for query in moves:
+            self.assertIn("SET n = props", query)
+            self.assertIn("properties(x) = props", query,
+                          "an identical edge already on `new` must not be duplicated")
 
     def test_the_twin_is_deleted_only_once_it_holds_nothing(self):
         session, _ = _absorb()
         deletes = [q for q, _ in session.queries if "DELETE old" in q]
         self.assertEqual(len(deletes), 1)
-        self.assertIn("WHERE NOT (old)--()", deletes[0])
+        self.assertIn("NOT (old)--()", deletes[0])
         self.assertNotIn("DETACH DELETE", deletes[0],
                          "DETACH is what silently dropped the edges")
 

@@ -4,3 +4,6 @@
 Dockerfile* text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Never EOL-convert binaries: the bundled incident-intel seed is sha256-pinned,
+# so a converted copy would be refused and the offline fallback lost.
+*.gz binary

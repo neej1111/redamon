@@ -6,6 +6,7 @@ import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
+import { field } from '@/lib/reconSettings/registry'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -326,13 +327,22 @@ function GraphqlCopSubSection({ data, updateField }: GraphqlCopSubSectionProps) 
               <div className={styles.fieldRow}>
                 <div className={styles.fieldGroup}>
                   <label className={styles.fieldLabel}>Docker Image</label>
-                  <input
-                    type="text"
-                    className="textInput"
+                  {/* A closed list, not free text. An image outside the shipped
+                      set is REFUSED at the write now; as a text box the form
+                      would accept a typed value and the save would reject it. */}
+                  <select
+                    className="select"
                     value={(data as any).graphqlCopDockerImage ?? 'dolevf/graphql-cop:1.14'}
                     onChange={(e) => updateField('graphqlCopDockerImage' as any, e.target.value)}
-                  />
-                  <span className={styles.fieldHint}>Pinned to 1.14 (DockerHub tag). Override for custom forks.</span>
+                  >
+                    {(field('graphqlCopDockerImage')?.values ?? []).map(v => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                  <span className={styles.fieldHint}>
+                    Only images RedAmon ships. An operator can add a private-registry mirror
+                    with RECON_EXTRA_ALLOWED_IMAGES on the server.
+                  </span>
                 </div>
                 <div className={styles.fieldGroup}>
                   <label className={styles.fieldLabel}>Timeout (seconds)</label>

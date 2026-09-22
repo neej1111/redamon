@@ -189,14 +189,21 @@ class TriageMixin:
             return {"unmuted": False, "label": None}
         return {"unmuted": True, "label": record["label"]}
 
-    def list_muted(self, user_id: str, project_id: str) -> list:
+    def list_muted(self, user_id: str, project_id: str,
+                   limit: int | None = None) -> list:
         """Every suppressed finding in the project.
 
         The ONLY query in the codebase that deliberately matches `:Muted`. It is
         reachable exclusively from the webapp's Muted-table endpoint over the
         internal API; the agent cannot reach it, and `scope_query` refuses any
         agent query that so much as names the label.
+
+        `limit` is OPTIONAL and defaults to no clause at all, so the Muted table
+        in the UI keeps counting every row exactly as before. A caller that
+        cannot afford an unbounded transfer - the MCP surface, which has no cap
+        on this path - passes one and reports its own result as partial.
         """
+        limit_clause = "\n        LIMIT $limit" if limit else ""
         query = f"""
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id
@@ -210,11 +217,13 @@ class TriageMixin:
                coalesce(n.muted_reason, '')        AS muted_reason,
                coalesce(n.triage_status, 'unreviewed') AS triage_status,
                n.triage_reason                     AS triage_reason
-        ORDER BY n.muted_at DESC
+        ORDER BY n.muted_at DESC{limit_clause}
         """
+        params = {"user_id": user_id, "project_id": project_id}
+        if limit:
+            params["limit"] = int(limit)
         with self.driver.session() as session:
-            return [dict(r) for r in session.run(
-                query, user_id=user_id, project_id=project_id)]
+            return [dict(r) for r in session.run(query, **params)]
 
     def list_triage_findings(self, user_id: str, project_id: str, limit: int = 2000) -> list:
         """Every finding in triage scope that is NOT muted, for the Priority Board.
@@ -557,12 +566,27 @@ class TriageMixin:
         }
 
     def set_human_verdict(self, user_id: str, project_id: str, node_id: str,
-                          status: str, reason: str = "") -> dict:
+                          status: str, reason: str = "",
+                          channel: str = "", verdict_by: str = "") -> dict:
         """Record an operator's own verdict, which the AI may not later overwrite.
 
         Stamping `triage_source = 'human'` is what makes the skip in
         `apply_triage_scores` fire on the next run: facts and factors keep
         updating, but the verdict stays theirs.
+
+        A verdict delegated through an access token is STILL `'human'`, and
+        writing a third value there would be actively wrong. It is the closed
+        two-value set four other behaviours branch on: the ingest-then-prune
+        keep predicate is `(n:Muted OR coalesce(n.triage_source,'') = 'human')`,
+        so a third value makes the finding prune-eligible and a re-scan DELETES
+        it; the publish guard re-reads the same equality, so a later AI run
+        overwrites the verdict; `finding_state` tests
+        `triage_source in ("human","ai")`, so `likely_noise` stops meaning
+        false-positive; and the board renders anything else as "Not reviewed".
+
+        So the VALUE stays `human` and the CHANNEL is recorded separately.
+        `verdict_by` mirrors `muted_by`: without it the node recorded only who
+        the verdict was not.
         """
         if status not in VALID_TRIAGE_STATUS:
             return {"updated": False, "reason": f"invalid status {status!r}"}
@@ -573,6 +597,8 @@ class TriageMixin:
         SET n.triage_status = $status,
             n.triage_reason = $reason,
             n.triage_source = 'human',
+            n.triage_verdict_channel = $channel,
+            n.triage_verdict_by = $verdict_by,
             n.triage_confidence = 1.0,
             n.triaged_at = datetime()
         RETURN {_FUNCTIONAL_LABEL} AS label
@@ -581,6 +607,9 @@ class TriageMixin:
             record = session.run(
                 query, node_id=node_id, user_id=user_id, project_id=project_id,
                 status=status, reason=str(reason or "")[:500],
+                channel=str(channel or "app")[:32],
+                # Defaults to the tenant, which is who a UI verdict is by.
+                verdict_by=str(verdict_by or user_id)[:128],
             ).single()
 
         return {"updated": record is not None,

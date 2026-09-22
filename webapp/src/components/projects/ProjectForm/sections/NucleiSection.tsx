@@ -9,6 +9,7 @@ import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { TimeEstimate } from '../TimeEstimate'
 import { FileImportButton } from '../FileImportButton'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -640,6 +641,14 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
           </div>
           </>
           )}
+
+          <RegistryFields
+            keys={['nucleiDockerImage', 'nucleiTakeoverRunTimeout']}
+            data={data}
+            updateField={updateField}
+            title="Advanced"
+            description="Settings this tool accepts that have no dedicated control. Bounds, options and descriptions come from the settings registry, so they are the same ones the API enforces."
+          />
         </div>
       )}
     </div>

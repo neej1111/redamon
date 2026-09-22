@@ -283,10 +283,17 @@ class TestAgentPromptSchemaSync:
             pytest.skip("agentic/prompts/base.py not present in this checkout")
             return
         src = prompts_path.read_text()
-        assert "vhost_sni_enum" in src, \
-            "TEXT_TO_CYPHER_SYSTEM doesn't mention vhost_sni_enum source"
-        assert "hidden_vhost" in src or "hidden_sni_route" in src, \
-            "Vulnerability type enum for vhost_sni_enum not documented"
+        # The schema moved OUT of TEXT_TO_CYPHER_SYSTEM: the prompt now holds the
+        # invariant rules and splices the catalog in at __GRAPH_SCHEMA__. A
+        # Vulnerability source is schema, so it is declared in the catalog.
+        catalog = (
+            Path(__file__).resolve().parent.parent.parent
+            / "graph_db" / "schema_sections.md"
+        ).read_text(encoding="utf-8")
+        assert "vhost_sni_enum" in catalog, \
+            "graph_db/schema_sections.md doesn't mention the vhost_sni_enum source"
+        assert "hidden_vhost" in catalog or "hidden_sni_route" in catalog, \
+            "Vulnerability type enum for vhost_sni_enum not declared in the catalog"
 
 
 # ===========================================================================

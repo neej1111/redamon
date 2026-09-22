@@ -105,9 +105,12 @@ RUN PRISMA_VER=$(node -p "require('/tmp/prisma-pkg.json').version") && \
 #             schema.prisma. Anything that needs to read a dropped column has to
 #             run first; the TruffleHog profile migration does, and it exits
 #             non-zero on failure so the push never destroys the source data.
-#   AFTER   — the push would also drop the FTS objects and the ingest role, so
-#             those are re-applied immediately afterwards (§6.3).
-RUN printf '#!/bin/sh\nnode scripts/migrate-trufflehog-profiles.mjs 2>&1 || exit 1\necho "Syncing Prisma schema..."\nnode node_modules/prisma/build/index.js db push --skip-generate --accept-data-loss --schema ./prisma/schema.prisma 2>&1\nnode scripts/apply-ingest-role.mjs 2>&1\nnode scripts/apply-traffic-fts.mjs 2>&1\nexec node server.js\n' > /app/entrypoint.sh \
+#   AFTER   — the push would also drop the FTS objects, the ingest role and the
+#             engagement append-only trigger, so those are re-applied
+#             immediately afterwards (§6.3). The trigger is what makes "an
+#             authorization record cannot be rewritten" enforcement rather than
+#             a model comment.
+RUN printf '#!/bin/sh\nnode scripts/migrate-trufflehog-profiles.mjs 2>&1 || exit 1\necho "Syncing Prisma schema..."\nnode node_modules/prisma/build/index.js db push --skip-generate --accept-data-loss --schema ./prisma/schema.prisma 2>&1\nnode scripts/apply-ingest-role.mjs 2>&1\nnode scripts/apply-traffic-fts.mjs 2>&1\nnode scripts/apply-engagement-immutability.mjs 2>&1\nexec node server.js\n' > /app/entrypoint.sh \
     && chmod +x /app/entrypoint.sh
 
 USER nextjs

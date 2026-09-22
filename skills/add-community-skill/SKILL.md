@@ -36,7 +36,7 @@ workflow, that is a Community Chat Skill (different flow).
   A step naming a non-existent tool is dead on arrival.
 - **NEVER rebuild the agent for this.** `./agentic/community-skills` is
   volume-mounted **read-only** into the container
-  ([docker-compose.yml:762](../../docker-compose.yml#L762)); the `GET /community-skills`
+  ([docker-compose.yml:895](../../docker-compose.yml#L895)); the `GET /community-skills`
   endpoint auto-discovers by globbing the directory. Drop the file and it is live
   on the next call. (This is the exception to "agentic/ changes need a rebuild" -
   that applies to baked Python, not the mounted skills dirs.)

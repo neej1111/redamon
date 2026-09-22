@@ -275,3 +275,18 @@ describe('schema parity with pydantic (regression sentinels)', () => {
     expect(srv.tools[0].purpose).toBe('Does the thing')
   })
 })
+
+
+// REGRESSION: graph_summary and graph_schema ship on BOTH surfaces - the
+// agent's own tool list and the inbound MCP server - from one definition, yet
+// neither was reserved. A user registering an outbound MCP plugin could
+// therefore declare a tool called `graph_summary` and shadow the built-in one,
+// so the agent's "what does this project contain" answer came from a
+// third-party server instead of the graph.
+describe('REGRESSION: the shared graph tools are reserved', () => {
+  test('a plugin cannot shadow a built-in graph tool', () => {
+    for (const name of ['query_graph', 'graph_summary', 'graph_schema']) {
+      expect(BUILTIN_RESERVED_TOOL_NAMES.has(name), `${name} is not reserved`).toBe(true)
+    }
+  })
+})

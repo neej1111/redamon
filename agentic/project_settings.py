@@ -13,9 +13,27 @@ import contextvars
 import re
 from typing import Any, Optional
 
+# The engagement-limit derivation, shared with recon and the orchestrator so the
+# three services cannot disagree about whether a project's limits are live.
+from recon_settings.engagement import derive_roe_enabled
+
 logger = logging.getLogger(__name__)
 
 INTERNAL_HEADERS = {"X-Internal-Key": os.environ.get("INTERNAL_API_KEY", "")}
+
+# =============================================================================
+# GRAPH COMPANION TOOLS — one switch for three verbs
+# =============================================================================
+# graph_schema and graph_summary are the support acts for query_graph: what the
+# graph MEANS and what this project actually HAS. The operator sees one tool;
+# enabling query_graph grants all three, and {"query_graph": []} turns all three
+# off. There is no second checkbox anywhere, and no Prisma, frontend or jsonb
+# change - which is the point, because a new TOOL_PHASE_MAP key would be
+# permanently disabled on every existing project until someone backfilled it.
+#
+# Neither belongs in DANGEROUS_TOOLS: both are read-only, send no target
+# traffic, and so have no stealth rule, RoE category or confirmation gate.
+GRAPH_COMPANION_TOOLS = frozenset({"graph_schema", "graph_summary"})
 
 # =============================================================================
 # DANGEROUS TOOLS — require manual confirmation before execution
@@ -577,8 +595,10 @@ def fetch_agent_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['DOMAIN_BATCH_MODE'] = project.get('domainBatchMode', False)
     settings['DOMAIN_BATCH_GROUPS'] = project.get('domainBatchGroups') or []
 
-    # Rules of Engagement
-    settings['ROE_ENABLED'] = project.get('roeEnabled', DEFAULT_AGENT_SETTINGS['ROE_ENABLED'])
+    # Engagement limits. ROE_ENABLED is DERIVED, never read from the column.
+    # One implementation, in recon_settings.engagement, which recon and the
+    # orchestrator call too.
+    settings['ROE_ENABLED'] = derive_roe_enabled(project)
     settings['ROE_RAW_TEXT'] = project.get('roeRawText', DEFAULT_AGENT_SETTINGS['ROE_RAW_TEXT'])
     settings['ROE_CLIENT_NAME'] = project.get('roeClientName', DEFAULT_AGENT_SETTINGS['ROE_CLIENT_NAME'])
     settings['ROE_CLIENT_CONTACT_NAME'] = project.get('roeClientContactName', DEFAULT_AGENT_SETTINGS['ROE_CLIENT_CONTACT_NAME'])
@@ -790,6 +810,22 @@ def apply_memory_governor(settings: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+# Whether these settings were READ or merely DEFAULTED.
+#
+# load_project_settings() swallows every fetch error and falls back to
+# DEFAULT_AGENT_SETTINGS, whose target scope is EMPTY. For most callers that
+# degradation is fine. For anything that derives a SECURITY boundary from the
+# settings it is not: the caller cannot tell "this project has no target"
+# from "the settings service was unreachable", and those are different facts.
+#
+# Seen for real - with the webapp restarting, kali_exec refused every command
+# with "This project has no target domain or IPs configured. Configure the
+# target first." on a project whose target was configured all along. The
+# refusal was safe, the message sent the operator to the wrong place, and it
+# only fails safe because the default happens to be empty.
+SETTINGS_SOURCE_KEY = "_SETTINGS_SOURCE"
+
+
 def load_project_settings(project_id: str) -> dict[str, Any]:
     """
     Fetch settings for a specific project from webapp API.
@@ -810,14 +846,17 @@ def load_project_settings(project_id: str) -> dict[str, Any]:
     if not webapp_url:
         logger.warning("WEBAPP_API_URL not set, using DEFAULT_AGENT_SETTINGS")
         settings = DEFAULT_AGENT_SETTINGS.copy()
+        settings[SETTINGS_SOURCE_KEY] = "default"
     else:
         try:
             settings = fetch_agent_settings(project_id, webapp_url)
             logger.info(f"Loaded {len(settings)} agent settings from API for project {project_id}")
+            settings[SETTINGS_SOURCE_KEY] = "api"
         except Exception as e:
             logger.error(f"Failed to fetch agent settings for project {project_id}: {e}")
             logger.warning("Falling back to DEFAULT_AGENT_SETTINGS")
             settings = DEFAULT_AGENT_SETTINGS.copy()
+            settings[SETTINGS_SOURCE_KEY] = "default"
 
     # Memory governor (Part 3): scale concurrency to RAM available this turn.
     settings = apply_memory_governor(settings)
@@ -930,6 +969,17 @@ def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
     if tool_name.startswith("fs_") or tool_name.startswith("job_"):
         return True
 
+    # graph_schema / graph_summary INHERIT query_graph's gating: the operator
+    # sees one tool, and enabling it grants all three. They must NOT become
+    # TOOL_PHASE_MAP keys of their own, for two reasons that both fail silently:
+    # this function returns False for an unmapped tool, and fetch_agent_settings
+    # REPLACES the whole map rather than merging, so a project whose stored map
+    # predates the new keys would have the tools permanently disabled until
+    # someone backfilled the jsonb. Inheritance avoids both, and is total:
+    # {"query_graph": []} turns all three off.
+    if tool_name in GRAPH_COMPANION_TOOLS:
+        return is_tool_allowed_in_phase("query_graph", phase)
+
     tool_phase_map = get_setting('TOOL_PHASE_MAP', {})
     if tool_name in tool_phase_map:
         return phase in tool_phase_map[tool_name]
@@ -965,6 +1015,15 @@ def get_allowed_tools_for_phase(phase: str) -> list:
         for tool_name, allowed_phases in tool_phase_map.items()
         if phase in allowed_phases
     }
+
+    # The graph companions ride on query_graph (see is_tool_allowed_in_phase).
+    # This list builds the LLM's available-tools enum, so patching only the
+    # other function would leave them permitted but never offered - exactly the
+    # BUG #20 shape recorded in this docstring.
+    if is_tool_allowed_in_phase("query_graph", phase):
+        allowed.update(GRAPH_COMPANION_TOOLS)
+    else:
+        allowed.difference_update(GRAPH_COMPANION_TOOLS)
 
     # Always include foundational workspace + job tools (mirror of the
     # fs_/job_ bypass in is_tool_allowed_in_phase). Import lazily to keep

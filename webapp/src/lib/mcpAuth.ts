@@ -1,0 +1,556 @@
+/**
+ * Personal access tokens for the INBOUND MCP server (/api/mcp-server).
+ *
+ * RedAmon is the *server* here and the caller is untrusted, so the one thing
+ * this file exists to establish is WHICH USER a request is. Everything else -
+ * ownership, scopes, budgets - hangs off that single resolved id.
+ *
+ * Three deliberate departures from the rest of the codebase, each because this
+ * surface is programmatic, credentialed and internet-reachable:
+ *
+ *  - `assertMcpProjectAccess` does NOT honour ACCESS_ENFORCE. The shared
+ *    `requireProjectAccess` degrades an ownership violation to a logged warning
+ *    and ALLOWS the request when ACCESS_ENFORCE=0. That log-only mode exists for
+ *    a browser-rollout phase; here it would be a cross-tenant data breach
+ *    toggled by an environment variable.
+ *  - Scopes are checked on every call. A field that exists but is never read is
+ *    fail-open by omission.
+ *  - Expiry and revocation are re-checked on every call, not at connect, so both
+ *    take effect mid-session.
+ */
+import { createHash, randomBytes } from 'crypto'
+import prisma from '@/lib/prisma'
+import { constantTimeEqual } from '@/lib/constantTimeEqual'
+
+export const MCP_TOKEN_PREFIX = 'rdmn_mcp_'
+/** 24 bytes -> 48 hex chars, comfortably past the 40 the format calls for. */
+const TOKEN_RANDOM_BYTES = 24
+const PREFIX_DISPLAY_LEN = 8
+export const MCP_TOKEN_NAME_MAX = 64
+
+// --- scopes ------------------------------------------------------------------
+
+export const MCP_SCOPES = [
+  'recon:read',
+  'recon:scan',
+  'recon:overwrite',
+  'recon:settings',
+  // Split from recon:read rather than folded into it. Suppressed findings and
+  // the remediation corpus are data classes NO token has ever been able to
+  // reach by any route, so adding them to an existing scope would silently
+  // change what every already-minted credential can read, with no operator
+  // action and no change to the chips an incident responder sees on it.
+  'triage:read',
+  // Queued work DISPATCHES LATER and outlives the credential that created it:
+  // JobQueue carries no token id, and revoking a token writes only revokedAt.
+  // That is a materially different grant from starting a scan now.
+  'recon:queue',
+  // The only WRITE to a finding on this surface. It is durable, it suppresses
+  // future AI review of that finding, and it is not reversible from here.
+  'triage:write',
+  'graph:cypher',
+  // The act that binds the platform to a target. It gets its own checkbox so an
+  // operator can mint a token that tunes existing engagements without being able
+  // to open new ones. It also governs tightening an engagement afterwards, since
+  // both write the engagement agreement.
+  'project:create',
+  // Split from project:create for the same reason triage:write is split from
+  // recon:read: it is a DURABLE, NON-REVERSIBLE claim. Anyone holding it can
+  // assert that a given document authorized a given engagement, and that
+  // assertion outlives the token and appears in an audit. Writing the audit
+  // trail is a different act from configuring the work.
+  'engagement:authorize',
+  'kali:exec',
+] as const
+
+export type McpScope = (typeof MCP_SCOPES)[number]
+
+export const DEFAULT_MCP_SCOPES: McpScope[] = ['recon:read']
+
+const SCOPE_SET: ReadonlySet<string> = new Set(MCP_SCOPES)
+
+export function isKnownScope(value: string): value is McpScope {
+  return SCOPE_SET.has(value)
+}
+
+/**
+ * Validate a requested scope set at MINT time.
+ *
+ * An unknown scope rejects the whole token rather than being dropped: silently
+ * storing a subset would hand back a credential that does less than the operator
+ * asked for, and they would find out at the first failing call.
+ */
+export function validateScopes(raw: unknown): { scopes: McpScope[] } | { error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { error: 'At least one scope is required.' }
+  }
+  const out: McpScope[] = []
+  for (const s of raw) {
+    if (typeof s !== 'string' || !isKnownScope(s)) {
+      return { error: `Unknown scope: ${typeof s === 'string' ? s : typeof s}` }
+    }
+    if (!out.includes(s)) out.push(s)
+  }
+  return { scopes: out }
+}
+
+export class McpScopeError extends Error {
+  constructor(public scope: McpScope) {
+    super(`This token is missing the required scope: ${scope}`)
+    this.name = 'McpScopeError'
+  }
+}
+
+/** Throws a scope-naming error rather than a generic failure. */
+export function requireScope(token: { scopes: string[] }, scope: McpScope): void {
+  if (!token.scopes.includes(scope)) throw new McpScopeError(scope)
+}
+
+export function hasScope(token: { scopes: string[] }, scope: McpScope): boolean {
+  return token.scopes.includes(scope)
+}
+
+// --- mint / hash / verify -----------------------------------------------------
+
+export function hashToken(plaintext: string): string {
+  return createHash('sha256').update(plaintext, 'utf8').digest('hex')
+}
+
+export function generateToken(): { plaintext: string; hash: string; prefix: string } {
+  const plaintext = MCP_TOKEN_PREFIX + randomBytes(TOKEN_RANDOM_BYTES).toString('hex')
+  return {
+    plaintext,
+    hash: hashToken(plaintext),
+    prefix: plaintext.slice(0, MCP_TOKEN_PREFIX.length + PREFIX_DISPLAY_LEN),
+  }
+}
+
+/** Strip control characters and cap the length before storing an operator label. */
+export function sanitizeTokenName(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, MCP_TOKEN_NAME_MAX)
+}
+
+export const MCP_EXPIRY_PRESET_DAYS = [30, 60, 90, 365] as const
+export const MCP_DEFAULT_EXPIRY_DAYS = 90
+
+/**
+ * `null` means "no expiry", which is a deliberate operator choice. Anything that
+ * is neither null nor one of the presets is rejected rather than coerced.
+ */
+export function resolveExpiry(days: unknown): { expiresAt: Date | null } | { error: string } {
+  if (days === null || days === 'never') return { expiresAt: null }
+  const n = typeof days === 'number' ? days : Number(days)
+  if (!Number.isFinite(n) || !(MCP_EXPIRY_PRESET_DAYS as readonly number[]).includes(n)) {
+    return { error: 'Expiry must be 30, 60, 90 or 365 days, or "never".' }
+  }
+  return { expiresAt: new Date(Date.now() + n * 24 * 60 * 60 * 1000) }
+}
+
+/** A calendar date as far out as anyone plausibly means; past it, pick "never". */
+export const MCP_EXPIRY_DATE_MAX_DAYS = 3650
+
+/**
+ * An expiry CHANGE on an existing token: everything the mint accepts, plus
+ * `'now'` (end it immediately, and unlike a revoke it can be extended again)
+ * and a `YYYY-MM-DD` date, which lasts to the END of that day in UTC.
+ */
+export function resolveExpiryChange(
+  raw: unknown,
+  now = Date.now()
+): { expiresAt: Date | null } | { error: string } {
+  if (raw === 'now') return { expiresAt: new Date(now) }
+  if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const date = new Date(`${raw}T23:59:59.999Z`)
+    // Round-trip, because `2026-02-31` parses to a real date in some engines.
+    if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== raw) {
+      return { error: `'${raw}' is not a valid date.` }
+    }
+    if (date.getTime() <= now) {
+      return { error: 'The expiry date must be in the future. Use "Expire now" to end the token today.' }
+    }
+    if (date.getTime() > now + MCP_EXPIRY_DATE_MAX_DAYS * 24 * 60 * 60 * 1000) {
+      return { error: 'The expiry date is too far out. Choose "never" instead.' }
+    }
+    return { expiresAt: date }
+  }
+  return resolveExpiry(raw)
+}
+
+/**
+ * Does moving a token from `before` to `after` give it MORE power?
+ *
+ * Adding a scope, removing an expiry, or pushing it later all do, and a token
+ * that has already expired is revived by any later date. Those changes get the
+ * same step-up as minting: a stolen session cookie must not be able to upgrade
+ * an existing token any more than it can mint a new one. Everything else
+ * (dropping a scope, an earlier expiry) only narrows, and needs no step-up.
+ */
+export function isTokenWidening(
+  before: { scopes: readonly string[]; expiresAt: Date | null },
+  after: { scopes: readonly string[]; expiresAt: Date | null }
+): boolean {
+  if (after.scopes.some(s => !before.scopes.includes(s))) return true
+  if (after.expiresAt === null) return before.expiresAt !== null
+  if (before.expiresAt === null) return false
+  return after.expiresAt.getTime() > before.expiresAt.getTime()
+}
+
+// --- resolution ----------------------------------------------------------------
+
+export type McpAuthFailure =
+  | 'missing'      // no bearer presented
+  | 'malformed'    // not a rdmn_mcp_ token
+  | 'invalid'      // no such token
+  | 'revoked'
+  | 'expired'
+  | 'bad_scopes'   // the row carries a scope this build does not know
+
+export interface ResolvedMcpToken {
+  tokenId: string
+  userId: string
+  tokenPrefix: string
+  name: string
+  scopes: McpScope[]
+}
+
+export interface McpAuthResult {
+  ok: boolean
+  token?: ResolvedMcpToken
+  failure?: McpAuthFailure
+  /** Present whenever it can be derived, so a failure can be audited by prefix. */
+  prefix?: string
+}
+
+/** Extract the bearer value. The cookie and both service keys are ignored. */
+export function bearerFrom(headers: Headers): string {
+  const raw = headers.get('authorization') || ''
+  const m = /^Bearer\s+(.+)$/i.exec(raw.trim())
+  return m ? m[1].trim() : ''
+}
+
+/**
+ * Resolve a presented bearer to a token row.
+ *
+ * "No such token" and "hash mismatch" are the same code path - one indexed
+ * lookup on the unique hash - so they are indistinguishable in both message and
+ * timing. The residual comparison is constant-time for the same reason.
+ */
+export async function resolveMcpToken(presented: string): Promise<McpAuthResult> {
+  if (!presented) return { ok: false, failure: 'missing' }
+  if (!presented.startsWith(MCP_TOKEN_PREFIX)) {
+    return { ok: false, failure: 'malformed' }
+  }
+  const prefix = presented.slice(0, MCP_TOKEN_PREFIX.length + PREFIX_DISPLAY_LEN)
+
+  const row = await prisma.mcpAccessToken.findUnique({
+    where: { tokenHash: hashToken(presented) },
+    select: {
+      id: true, userId: true, name: true, tokenPrefix: true, tokenHash: true,
+      scopes: true, revokedAt: true, expiresAt: true,
+    },
+  })
+  if (!row || !constantTimeEqual(row.tokenHash, hashToken(presented))) {
+    return { ok: false, failure: 'invalid', prefix }
+  }
+  // Re-checked per call, so revoking or expiring takes effect mid-session
+  // rather than at the client's next reconnect.
+  if (row.revokedAt) return { ok: false, failure: 'revoked', prefix: row.tokenPrefix }
+  if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
+    return { ok: false, failure: 'expired', prefix: row.tokenPrefix }
+  }
+  // A row carrying a scope this build does not know is a downgrade or a
+  // tampered row: reject the TOKEN rather than ignore the scope.
+  if (!row.scopes.every(isKnownScope)) {
+    return { ok: false, failure: 'bad_scopes', prefix: row.tokenPrefix }
+  }
+
+  return {
+    ok: true,
+    prefix: row.tokenPrefix,
+    token: {
+      tokenId: row.id,
+      userId: row.userId,
+      tokenPrefix: row.tokenPrefix,
+      name: row.name,
+      scopes: row.scopes as McpScope[],
+    },
+  }
+}
+
+/** Resolve straight from a request, so the route never handles the raw header. */
+export async function resolveMcpUser(request: Request): Promise<McpAuthResult> {
+  return resolveMcpToken(bearerFrom(request.headers))
+}
+
+// --- lastUsedAt, throttled -----------------------------------------------------
+
+const LAST_USED_THROTTLE_MS = 60_000
+const globalForLastUsed = globalThis as unknown as { __mcpLastUsed?: Map<string, number> }
+const lastUsedAt: Map<string, number> = globalForLastUsed.__mcpLastUsed ?? new Map()
+globalForLastUsed.__mcpLastUsed = lastUsedAt
+
+/**
+ * Best-effort and throttled to once per token per minute, so a busy agent does
+ * not turn every tool call into a database write. Never awaited by the caller's
+ * critical path and never throws.
+ */
+export function touchTokenUsage(tokenId: string): void {
+  const now = Date.now()
+  const prev = lastUsedAt.get(tokenId) ?? 0
+  if (now - prev < LAST_USED_THROTTLE_MS) return
+  lastUsedAt.set(tokenId, now)
+  // Bound the map the way loginThrottle does: drop entries older than a window.
+  if (lastUsedAt.size > 10_000) {
+    for (const [k, t] of lastUsedAt) {
+      if (now - t > LAST_USED_THROTTLE_MS) lastUsedAt.delete(k)
+    }
+  }
+  prisma.mcpAccessToken
+    .update({ where: { id: tokenId }, data: { lastUsedAt: new Date(now) } })
+    .catch((err: unknown) => console.error('[mcp] could not record token usage:', err))
+}
+
+/** Test seam: the throttle map is process-global by design. */
+export function __resetTokenUsageThrottle(): void {
+  lastUsedAt.clear()
+}
+
+// --- ownership ------------------------------------------------------------------
+
+export class McpAccessDenied extends Error {
+  constructor(message = 'Project not found') {
+    super(message)
+    this.name = 'McpAccessDenied'
+  }
+}
+
+/**
+ * The hard variant of `requireProjectAccess`, with the same 404
+ * anti-enumeration semantics but NO log-only mode.
+ *
+ * A project that does not exist and a project owned by someone else are the
+ * same answer, so a token holder cannot enumerate other users' project ids.
+ */
+export async function assertMcpProjectAccess(
+  userId: string,
+  projectId: unknown
+): Promise<{ id: string; userId: string }> {
+  if (typeof projectId !== 'string' || !projectId) {
+    throw new McpAccessDenied('projectId is required')
+  }
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { id: true, userId: true },
+  })
+  // Deliberately NOT ACCESS_ENFORCE-aware: on this surface a mismatch is always
+  // hard, whatever the environment says.
+  if (!project || project.userId !== userId) throw new McpAccessDenied()
+  return project
+}
+
+// --- per-token rate limiting ------------------------------------------------------
+//
+// Keyed on TOKEN ID, not IP: one agent behind one NAT is one caller, and IP
+// keying would punish the wrong thing. In-memory and per-process (webapp is
+// single-replica, so a shared store is not required; if ever scaled out, move to
+// a Postgres counter - the audit trail is already durable). BOUNDED with a hard
+// entry cap and lazy eviction so a flood of distinct tokens cannot turn a
+// rate limiter into a memory-exhaustion vector. Thresholds come from env with
+// SAFE DEFAULTS, so an unset value falls back to the documented limit and never
+// to "no limit".
+
+export type McpBucketName = 'read' | 'query' | 'write' | 'start' | 'exec' | 'compare'
+
+interface BucketSpec {
+  /** Max calls in the window. */
+  limit: number
+  windowMs: number
+}
+
+function envInt(name: string, fallback: number): number {
+  const n = parseInt(process.env[name] || '', 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+export function bucketSpec(bucket: McpBucketName): BucketSpec {
+  switch (bucket) {
+    // Cheap reads: generous, they cost a Postgres or bounded Neo4j read.
+    case 'read':
+      return { limit: envInt('MCP_RATE_READ_PER_MIN', 120), windowMs: 60_000 }
+    // NL -> Cypher spends the owner's LLM key, so this is moderate.
+    case 'query':
+      return { limit: envInt('MCP_RATE_QUERY_PER_MIN', 20), windowMs: 60_000 }
+    case 'write':
+      return { limit: envInt('MCP_RATE_WRITE_PER_MIN', 10), windowMs: 60_000 }
+    // Strict: one start per project per 5 minutes. A 'new' start consumes a
+    // retention slot, so a looping agent must not be able to churn the timeline.
+    case 'start':
+      return { limit: envInt('MCP_RATE_START_PER_WINDOW', 1), windowMs: envInt('MCP_RATE_START_WINDOW_MS', 300_000) }
+    // Each call reaches a live third-party target from RedAmon's own address,
+    // so this is tighter than the read bucket. Polling a running command uses
+    // the cheap `read` bucket instead, so a slow tool does not have to spend
+    // this one to be watched.
+    //
+    // Not tighter still: one command is ONE tool invocation, and a recon pass
+    // is naturally a few dozen of them. At 6/min a routine sequence spent most
+    // of its time sleeping, which pushes callers toward heavier single
+    // commands - the opposite of what this bucket is for. The containment here
+    // is the allowlist and the scope check; this is a runaway-loop ceiling.
+    case 'exec':
+      return { limit: envInt('MCP_RATE_EXEC_PER_MIN', 20), windowMs: 60_000 }
+    // Orders of magnitude heavier than any other read: a version comparison
+    // gunzips and parses a whole stored graph, and a `current` side captures
+    // the live one under the snapshot semaphore.
+    //
+    // It needs its OWN bucket name rather than a per-project `query` key,
+    // because the key is `bucket|token|scopeKey` while `bucketSpec` switches on
+    // the bucket NAME alone: a per-project `query` counter would be separate
+    // but still allow 20 a minute, and twenty full-graph captures a minute per
+    // project is not a limit.
+    case 'compare':
+      return {
+        limit: envInt('MCP_RATE_COMPARE_PER_WINDOW', 2),
+        windowMs: envInt('MCP_RATE_COMPARE_WINDOW_MS', 300_000),
+      }
+  }
+}
+
+interface Hits {
+  count: number
+  firstAt: number
+}
+
+const MAX_LIMITER_ENTRIES = 10_000
+const globalForLimiter = globalThis as unknown as { __mcpLimiter?: Map<string, Hits> }
+const limiter: Map<string, Hits> = globalForLimiter.__mcpLimiter ?? new Map()
+globalForLimiter.__mcpLimiter = limiter
+
+export interface RateDecision {
+  allowed: boolean
+  /** Seconds until the window resets. Always a number, so callers can say when. */
+  retryAfterSeconds: number
+}
+
+/**
+ * `scopeKey` lets a bucket be counted per project (the start bucket) rather than
+ * per token, which is what "1 start per project per 5 minutes" means.
+ */
+export function checkRateLimit(
+  bucket: McpBucketName,
+  tokenId: string,
+  scopeKey = ''
+): RateDecision {
+  const spec = bucketSpec(bucket)
+  const key = `${bucket}|${tokenId}|${scopeKey}`
+  const now = Date.now()
+
+  if (limiter.size > MAX_LIMITER_ENTRIES) {
+    // Lazy eviction: anything whose window has already closed is dead weight.
+    for (const [k, h] of limiter) {
+      if (now - h.firstAt >= bucketSpec(k.split('|')[0] as McpBucketName).windowMs) {
+        limiter.delete(k)
+      }
+    }
+    // Still over the cap: drop the oldest half rather than grow without bound.
+    // Losing a live counter can only ever be generous to the caller, which is
+    // the right direction for a memory bound to fail in.
+    if (limiter.size > MAX_LIMITER_ENTRIES) {
+      const oldest = [...limiter.entries()]
+        .sort((a, b) => a[1].firstAt - b[1].firstAt)
+        .slice(0, Math.floor(limiter.size / 2))
+      for (const [k] of oldest) limiter.delete(k)
+    }
+  }
+
+  const hit = limiter.get(key)
+  if (!hit || now - hit.firstAt >= spec.windowMs) {
+    limiter.set(key, { count: 1, firstAt: now })
+    return { allowed: true, retryAfterSeconds: 0 }
+  }
+  if (hit.count >= spec.limit) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((hit.firstAt + spec.windowMs - now) / 1000)),
+    }
+  }
+  hit.count += 1
+  return { allowed: true, retryAfterSeconds: 0 }
+}
+
+/** Test seam: the limiter is process-global by design. */
+export function __resetRateLimiter(): void {
+  limiter.clear()
+}
+
+// --- per-token LLM budget ---------------------------------------------------------
+//
+// The `question` path spends the PROJECT OWNER's provider key, and one request
+// can cost up to 9 provider calls. The agent's own daily cap keys on the
+// user id, so a single user's several tokens share one pool there; this is the
+// per-TOKEN layer, so one runaway agent cannot consume the user's whole budget.
+
+const globalForBudget = globalThis as unknown as { __mcpLlmBudget?: Map<string, Hits> }
+const llmBudget: Map<string, Hits> = globalForBudget.__mcpLlmBudget ?? new Map()
+globalForBudget.__mcpLlmBudget = llmBudget
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+export interface BudgetDecision {
+  allowed: boolean
+  used: number
+  limit: number
+  /** ISO timestamp at which the daily window rolls over. */
+  resetsAt: string
+}
+
+const MAX_BUDGET_ENTRIES = 10_000
+
+/**
+ * The daily cap, read WITHOUT spending any of it.
+ *
+ * `checkLlmBudget` is the only other way to learn the number and it consumes a
+ * call to do so, which makes it useless to anything that merely documents the
+ * limit.
+ */
+export function llmBudgetLimit(): number {
+  return envInt('MCP_LLM_DAILY_BUDGET', 200)
+}
+
+export function checkLlmBudget(tokenId: string): BudgetDecision {
+  const limit = llmBudgetLimit()
+  const now = Date.now()
+
+  // Bounded like `limiter` and `lastUsedAt`. Without this the map grew one
+  // entry per token ever used on the question path and NEVER shrank - not even
+  // for a window that had already rolled over - which is the memory-exhaustion
+  // shape the other two carry explicit comments about avoiding.
+  if (llmBudget.size >= MAX_BUDGET_ENTRIES) {
+    for (const [k, h] of llmBudget) {
+      if (now - h.firstAt >= DAY_MS) llmBudget.delete(k)
+    }
+    if (llmBudget.size >= MAX_BUDGET_ENTRIES) {
+      const oldest = [...llmBudget.entries()].sort((a, b) => a[1].firstAt - b[1].firstAt)
+      for (const [k] of oldest.slice(0, Math.floor(oldest.length / 2))) llmBudget.delete(k)
+    }
+  }
+
+  const hit = llmBudget.get(tokenId)
+
+  if (!hit || now - hit.firstAt >= DAY_MS) {
+    llmBudget.set(tokenId, { count: 1, firstAt: now })
+    return { allowed: true, used: 1, limit, resetsAt: new Date(now + DAY_MS).toISOString() }
+  }
+  const resetsAt = new Date(hit.firstAt + DAY_MS).toISOString()
+  if (hit.count >= limit) {
+    return { allowed: false, used: hit.count, limit, resetsAt }
+  }
+  hit.count += 1
+  return { allowed: true, used: hit.count, limit, resetsAt }
+}
+
+/** Test seam: the budget map is process-global by design. */
+export function __resetLlmBudget(): void {
+  llmBudget.clear()
+}

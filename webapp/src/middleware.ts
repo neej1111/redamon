@@ -4,7 +4,15 @@ import { constantTimeEqual } from './lib/constantTimeEqual'
 
 const AUTH_COOKIE_NAME = 'redamon-auth'
 
-const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/logout', '/api/health', '/api/version/check', '/api/global/tunnel-config/sync']
+// '/api/mcp-server' follows the /api/auth/login precedent: public at the
+// middleware layer, with the handler performing its own credential check and
+// failing closed. An MCP client presents a bearer and no cookie, so without
+// this entry every MCP request is rejected before reaching the handler.
+//
+// It must NOT be written as '/api/mcp': matching is
+// `pathname === p || pathname.startsWith(p + '/')`, so that entry would make
+// the OUTBOUND plugin-admin routes (/api/mcp/manifest|reload|test) public too.
+const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/logout', '/api/health', '/api/version/check', '/api/global/tunnel-config/sync', '/api/mcp-server']
 
 // S2/E2: the internal-key bypass is scoped to exactly the routes that internal
 // services (agent / orchestrator / recon) legitimately reach with X-Internal-Key.
@@ -34,6 +42,9 @@ const INTERNAL_ALLOWLIST: { method: string; pattern: RegExp }[] = [
   { method: 'POST', pattern: /^\/api\/traffic\/[^/]+\/ingest$/ },
   // Periodic traffic housekeeping (retention/quota/orphan GC), internal cron only.
   { method: 'POST', pattern: /^\/api\/traffic\/maintenance$/ },
+  // Periodic pruning of long-dead MCP access tokens. The webapp has no
+  // scheduler of its own, so the orchestrator's maintenance loop drives it.
+  { method: 'POST', pattern: /^\/api\/internal\/mcp-tokens\/prune$/ },
   // Scan Timeline scheduler: the orchestrator worker polls for due schedules and
   // asks the webapp to run or defer them (the webapp owns the version freeze).
   { method: 'GET', pattern: /^\/api\/internal\/scan-schedules\/due$/ },

@@ -7,6 +7,7 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { FileImportButton } from '../FileImportButton'
+import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -191,6 +192,14 @@ export function HakrawlerSection({ data, updateField, onRun }: HakrawlerSectionP
               </div>
             </>
           )}
+
+          <RegistryFields
+            keys={['hakrawlerDockerImage']}
+            data={data}
+            updateField={updateField}
+            title="Advanced"
+            description="Settings this tool accepts that have no dedicated control. Bounds, options and descriptions come from the settings registry, so they are the same ones the API enforces."
+          />
         </div>
       )}
     </div>

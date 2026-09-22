@@ -16,6 +16,9 @@
  */
 import { createHash } from 'crypto'
 
+import { deriveRoeEnabled } from '@/lib/engagement'
+import { fingerprintFields, fingerprintKinds } from '@/lib/reconSettings/registry'
+
 export type JobKind =
   | 'full_recon'
   | 'partial_recon'
@@ -68,27 +71,28 @@ export function envelopeForKind(kind: string): number {
 /**
  * The scan-relevant project-settings subset per kind (C-4). A change to ANY of
  * these between enqueue and dispatch must block the run for re-confirmation, so
- * the fingerprint covers exactly the fields that steer where/what a job scans.
+ * the fingerprint covers exactly the fields that steer where or how hard a job
+ * scans.
+ *
+ * DERIVED from the recon settings registry, not hand-listed. The list it
+ * replaced named six fields for `full_recon` and no `roe*` field at all, which
+ * was survivable while 126 columns were mutable and is not now: queued work
+ * outlives the token that created it, so enqueue under a 3 rps ceiling, raise
+ * the ceiling, dispatch was a scope-compliant configuration becoming a
+ * non-compliant run with nothing failing.
+ *
+ * Scoped per kind through the registry's own `tool` and `phase`, so a gvm job
+ * does not re-confirm because someone changed a ffuf thread count.
+ *
+ * Two cases the registry cannot see, both already handled by the caller through
+ * `extra`: TruffleHog's targets live on a per-source profile rather than the
+ * Project row, and the auth profile is a relation for the same reason.
  */
-export const FINGERPRINT_FIELDS: Record<string, readonly string[]> = {
-  full_recon: ['targetDomain', 'ipMode', 'targetIps', 'scanModules', 'targetGuardrailEnabled', 'stealthMode'],
-  partial_recon: ['targetDomain', 'ipMode', 'targetIps', 'scanModules', 'targetGuardrailEnabled', 'stealthMode'],
-  // gvmPortList steers WHAT is scanned: swapping the top-1000 UDP list for the
-  // full IANA sweep turns a minutes-long scan into an hours-long one. Omitting it
-  // would let that change slip past the C-4 re-confirmation guard.
-  gvm: ['targetDomain', 'ipMode', 'targetIps', 'gvmScanConfig', 'gvmScanTargets', 'gvmPortList'],
-  github_hunt: ['githubTargetOrg', 'githubTargetRepos', 'githubScanMembers', 'githubScanGists', 'githubScanCommits'],
-  // Only the SHARED options still live on Project; the per-source targets moved
-  // to TrufflehogScanProfile and are folded in by the caller through `extra`
-  // (see resolveTrufflehogFingerprintExtra). Listing the old
-  // trufflehogGithubOrg/Repos columns here would hash a CONSTANT — the fields no
-  // longer exist, settingsFingerprint skips undefined ones, and the C-4
-  // re-confirmation guard would be silently disabled.
-  trufflehog: ['trufflehogNoVerification', 'trufflehogResultTypes', 'trufflehogIncludeDetectors', 'trufflehogExcludeDetectors'],
-  supply_chain: ['supplyChainInputMode', 'supplyChainSbomFile', 'supplyChainRepoUrl', 'supplyChainRepoRef', 'supplyChainRepoScope', 'supplyChainDeepAnalysisEnabled'],
-  supply_chain_repo: ['supplyChainInputMode', 'supplyChainSbomFile', 'supplyChainRepoUrl', 'supplyChainRepoRef', 'supplyChainRepoScope', 'supplyChainDeepAnalysisEnabled'],
-  ai_attack: [],
-}
+export const FINGERPRINT_FIELDS: Record<string, readonly string[]> = Object.freeze(
+  Object.fromEntries(
+    fingerprintKinds().map(kind => [kind, Object.freeze(fingerprintFields(kind))])
+  )
+)
 
 /** Stable JSON: sorted object keys, sorted primitive arrays, so equal settings
  * always serialize identically regardless of field or array order. */
@@ -136,6 +140,14 @@ export function settingsFingerprint(
     for (const [k, v] of Object.entries(extra)) {
       if (v !== undefined) subset[k] = v
     }
+  }
+  // Whether the engagement's limits are LIVE is a synthetic input, because it is
+  // derived rather than stored and FINGERPRINT_FIELDS only sees columns. It is
+  // not redundant with the columns it is derived from: a project can reach the
+  // same derived answer by three different routes, and the effective
+  // configuration of a queued job turns on the answer rather than on the route.
+  if (fields.length > 0) {
+    subset.__engagementLimitsActive = deriveRoeEnabled(project as never)
   }
   const canonical = JSON.stringify({ kind, settings: canonicalize(subset) })
   return createHash('sha256').update(canonical).digest('hex')

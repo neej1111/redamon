@@ -169,6 +169,12 @@ COPY recon/ /app/recon/
 # Copy graph_db module (for Neo4j integration)
 COPY graph_db/ /app/graph_db/
 
+# The recon settings registry: every parameter's bound, unit and engagement cap.
+# A scan REFUSES TO START without it, so it is baked rather than only mounted;
+# the orchestrator binds the host copy over this one when it can resolve the
+# path, which is what gives a registry edit effect without a rebuild.
+COPY recon_settings/ /app/recon_settings/
+
 # Note: .env file is mounted via docker-compose volume, not copied here
 
 # Copy entrypoint script

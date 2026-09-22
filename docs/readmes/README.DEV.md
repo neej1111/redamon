@@ -751,7 +751,7 @@ Other capable models (GPT-5, Gemini 2.5 Pro) can also work, but Opus 4.6 has bee
 5. **Don't blindly add dependencies** — If the AI suggests a new `import` or `require`, check that the package exists in the relevant `requirements.txt` or `package.json` first. Adding an uninstalled dependency will crash-loop the container.
 6. **Keep diffs minimal** — Resist the temptation to let AI refactor, reformat, or "improve" surrounding code. PRs should only contain changes relevant to the task. Large AI-generated diffs that touch unrelated files are hard to review and will be rejected.
 7. **No AI-generated comments or docs unless requested** — Don't let AI litter the code with docstrings, inline comments, or type annotations that weren't there before. Follow the existing code style.
-8. **Validate Cypher queries and Prisma schemas** — AI models frequently hallucinate Neo4j node labels, relationship types, and Prisma field names. Always cross-check generated queries against [GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) and the actual Prisma schema.
+8. **Validate Cypher queries and Prisma schemas** — AI models frequently hallucinate Neo4j node labels, relationship types, and Prisma field names. Always cross-check generated queries against [graph_db/schema_sections.md](../../graph_db/schema_sections.md) - the single declaration of every label, property and relationship - and the actual Prisma schema.
 
 ---
 
@@ -986,7 +986,8 @@ All deep-dive documentation lives in the `docs/readmes/` folder alongside this f
 | [README.WEBAPP.md](README.WEBAPP.md) | Webapp architecture, component tree, page structure |
 | [README.GVM.md](README.GVM.md) | OpenVAS/GVM scanner integration (170k+ NVTs) |
 | [README.GRAPH_DB.md](README.GRAPH_DB.md) | Neo4j graph utilities |
-| [GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) | Full Neo4j node types, relationship types, and property definitions |
+| [graph_db/schema_sections.md](../../graph_db/schema_sections.md) | THE declaration: every node label, property and relationship |
+| [GRAPH.SCHEMA.md](GRAPH.SCHEMA.md) | Why the graph is shaped this way: design principles, tenancy, the `Muted` label. Lists no labels |
 | [README.POSTGRES.md](README.POSTGRES.md) | PostgreSQL schema details (Prisma models, field reference) |
 | [README.GPIGS.md](README.GPIGS.md) | Guinea pigs — intentionally vulnerable test applications for local testing |
 

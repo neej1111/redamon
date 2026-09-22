@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import re
 import subprocess
 import sys
 
@@ -53,6 +54,26 @@ def wanted(t: str, want: str) -> bool:
     if want == "all":
         return t in ("unit", "integration")
     return t == want
+
+
+_SUMMARY_RE = re.compile(r"\b(\d+) (?:passed|failed|error|errors|xpassed|xfailed)\b")
+
+
+def tests_executed(output: str) -> int:
+    """
+    How many test CASES a pytest run reported, from its summary line.
+
+    File counts hide an empty gate: twenty files that each collect one trivial
+    test look identical to twenty real suites. The case count is what a reader
+    can sanity-check against what the suite is supposed to contain.
+    """
+    total = 0
+    for line in reversed(output.splitlines()):
+        if "passed" in line or "failed" in line or "error" in line:
+            found = _SUMMARY_RE.findall(line)
+            if found:
+                return sum(int(n) for n in found)
+    return total
 
 
 def collect_files(testpaths, want, exclude=()):
@@ -158,13 +179,16 @@ def main() -> int:
 
     print(f">> {args.tier}: {len(files)} files (parallel={args.parallel}, per-file isolation)")
     failures = []
-    passed = skipped = 0
+    empty_files = []
+    passed = 0
+    executed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as ex:
         markexpr = ["-m", _MARKEXPR[args.tier]]
         for path, code, out in ex.map(lambda p: run_one(p, markexpr), files):
             if code == 5:            # no tests collected in this file
-                skipped += 1
+                empty_files.append(path)
                 continue
+            executed += tests_executed(out)
             if code != 0:
                 failures.append((path, code, out))
             else:
@@ -175,8 +199,17 @@ def main() -> int:
         lines = [ln for ln in out.splitlines() if ("FAILED" in ln or "ERROR" in ln)]
         print("\n".join(lines[-8:]) if lines else out.splitlines()[-8:])
 
+    # A file that collects nothing reads as a pass. It is a signal, not a
+    # result: a script-style test with no `def test_` exits 5 and the gate has
+    # gone green having asserted nothing. Name them so the count is actionable.
+    if empty_files:
+        print(f"\n>> {args.tier}: {len(empty_files)} file(s) collected NO tests:")
+        for path in empty_files:
+            print(f"     {path}")
+
     print(f"\n>> {args.tier}: {passed} files passed, {len(failures)} failed, "
-          f"{skipped} empty/skipped")
+          f"{len(empty_files)} empty/skipped")
+    print(f">> {args.tier}: TESTS EXECUTED: {executed}")
     return 1 if failures else 0
 
 

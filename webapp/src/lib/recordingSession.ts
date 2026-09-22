@@ -118,7 +118,6 @@ interface ProjectScopeFields {
   targetDomain?: string | null
   subdomainList?: string[]
   targetIps?: string[]
-  roeEnabled?: boolean
   roeExcludedHosts?: string[]
 }
 
@@ -160,7 +159,9 @@ export function defaultRecordingScope(project: ProjectScopeFields): string[] {
     }
   }
   let { hosts } = normalizeScopeHosts(raw)
-  if (project.roeEnabled && project.roeExcludedHosts?.length) {
+  // A non-empty exclusion list IS the limit: there is no separate switch that
+  // could leave it configured and inert.
+  if (project.roeExcludedHosts?.length) {
     hosts = hosts.filter(h => !isRoeExcluded(h, project.roeExcludedHosts!))
   }
   return hosts

@@ -35,7 +35,7 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       where: { id },
       select: {
         userId: true, captureProxyEnabled: true, ipMode: true, targetDomain: true,
-        subdomainList: true, targetIps: true, roeEnabled: true, roeExcludedHosts: true,
+        subdomainList: true, targetIps: true, roeExcludedHosts: true,
       },
     })
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })

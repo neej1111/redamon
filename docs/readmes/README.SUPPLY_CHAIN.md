@@ -233,6 +233,44 @@ never silently vanished, because the sync report is read as coverage:
 | a specific host or a deeper wildcard under one | **kept**: it names one attacker deployment |
 | OAST providers (`oastify.com`, ...) | **kept** (they are real IOCs), suppressed at match time |
 
+### When the feed is down: the bundled offline copy
+
+The repo ships an indicators-only snapshot of the catalog,
+`scanners/supply_chain_common/sca_intel_seed.json.gz` (~115 KB), built by
+[`intel_seed.py`](../../scanners/supply_chain_common/intel_seed.py). When a sync
+cannot use the live feed (unreachable, an HTTP error, a rejected envelope, or a
+feed with no indicators at all) and the volume holds **nothing usable**, the sync
+installs this copy instead of leaving the catalog empty, and reports `seeded`.
+
+- **Indicators only.** Hosts, wildcards, IPs, package names, typosquat pairs, and
+  per incident its id, status, severity, attack-vector labels, date and link. None
+  of the upstream prose (title, summary, remediation, blast radius): the catalog
+  publishes no licence. Findings matched from the copy carry an incident id and
+  link but an empty summary, which the webapp renders as absent.
+- **Trusted by pin, then re-validated.** The file's sha256 is pinned in
+  `intel_seed.py` and checked before decompression; every entry then passes the
+  same gates as the live sync (hostname charset, public-apex wildcard drop,
+  `is_global` IPs, package-name and advisory-id charsets, http(s)-only links).
+- **Visible as such.** The installed manifest records `source: bundled-seed` and a
+  revision suffixed `-bundled` (e.g. `2026-08-18-bundled`), which is what every
+  finding's `incident_feed_revised` shows.
+- **Never replaces live data.** A volume holding a live sync, however old, is kept
+  as is; only an empty volume or an older bundled copy is (re)seeded.
+- **The live feed is still retried.** The manifest is back-dated to when the
+  snapshot was fetched, so the TTL never treats the copy as fresh; the retry floor
+  alone paces the next attempt, and the first good sync replaces the copy.
+- **Not gated by the retry floor.** The floor spares the feed, and the copy needs
+  no fetch, so a sync skipped by the floor (or by the TTL) still seeds an empty
+  volume, without resetting the retry clock.
+- **Air-gapped deploys get it too.** With `SCA_INTEL_AUTO_REFRESH=false`,
+  install/update run `./redamon.sh sca-intel-sync --seed-only`, which installs the
+  copy into an empty volume inside a `--network none` container and never
+  contacts the feed.
+
+To refresh the snapshot, rebuild it from a volume holding a good live sync (the
+command is in the module docstring) and update `SEED_SHA256`; the build is
+byte-reproducible.
+
 ### Automatic refresh (lazy-on-scan)
 
 Same mechanism as the OSV DB above, on the same three spawn paths (full recon,
@@ -258,7 +296,7 @@ re-sync therefore applies within that window without a restart, at a cost of one
 
 | Knob (orchestrator env) | Default | Meaning |
 |---|---|---|
-| `SCA_INTEL_AUTO_REFRESH` | `true` | `false` for a strictly air-gapped deploy |
+| `SCA_INTEL_AUTO_REFRESH` | `true` | `false` for a strictly air-gapped deploy: the feed is never contacted, but an empty catalog still gets the bundled offline copy at install/update (`sca-intel-sync --seed-only`, run with no network) |
 | `SCA_INTEL_TTL_SECONDS` | `86400` | freshness window (24h) |
 | `SCA_INTEL_RETRY_SECONDS` | `3600` | retry floor after a failed or rejected fetch |
 | `SCA_INTEL_REFRESH_TIMEOUT` | `120` | hard ceiling on the sidecar |
@@ -921,5 +959,5 @@ webapp/src/app/api/supply-chain/                 # proxy routes + SBOM upload
 webapp/src/components/projects/ProjectForm/sections/SupplyChainSection.tsx
 webapp/src/app/api/analytics/redzone/supplyChainSca/route.ts    # SCA table API (3 sheets)
 webapp/src/app/graph/components/RedZoneTables/SupplyChainScaTable.tsx  # the table
-docs/readmes/GRAPH.SCHEMA.md                           # node documentation
+graph_db/schema_sections.md                            # node documentation (THE declaration)
 ```

@@ -40,7 +40,8 @@ from .security import (MAX_STRING_LEN, SanitizeError, sanitize_advisory,
 
 __all__ = ["sync_intel", "intel_is_fresh", "attempt_is_recent",
            "FEED_URL", "ALLOWED_HOSTS", "MAX_FEED_BYTES",
-           "DEFAULT_TTL_SECONDS", "DEFAULT_RETRY_SECONDS",
+           "DEFAULT_TTL_SECONDS", "DEFAULT_RETRY_SECONDS", "describe_result",
+           "seed_if_empty",
            "MANIFEST_NAME", "ATTEMPT_MARKER"]
 
 FEED_URL = "https://supplychainattack.org/incidents.json"
@@ -164,7 +165,7 @@ def fetch_feed(url=FEED_URL, *, timeout=DEFAULT_TIMEOUT, max_bytes=MAX_FEED_BYTE
                     raise FeedError("redirect with no Location header")
                 current = location
                 continue
-            raise FeedError("feed returned HTTP {}".format(exc.code))
+            raise FeedError(_describe_http_failure(exc))
         except urllib.error.URLError as exc:
             raise FeedError("feed unreachable: {}".format(exc.reason))
         except OSError as exc:
@@ -187,6 +188,36 @@ def fetch_feed(url=FEED_URL, *, timeout=DEFAULT_TIMEOUT, max_bytes=MAX_FEED_BYTE
             raise FeedError("feed is not valid JSON: {}".format(exc))
 
     raise FeedError("too many redirects")
+
+
+# A bare "HTTP 402" reads as a RedAmon bug; these say whose outage it is.
+_HTTP_STATUS_REASONS = {
+    402: "the feed's hosting is paused or disabled upstream",
+    403: "the feed host refused the request",
+    404: "the feed is no longer published at this URL",
+    410: "the feed is no longer published at this URL",
+    429: "the feed host is rate-limiting requests",
+}
+
+# Vercel names the exact reason in a header (DEPLOYMENT_DISABLED, ...). It is
+# attacker-influenceable text going to a log, so only a short token is echoed.
+_VERCEL_ERROR_MAX = 64
+
+
+def _describe_http_failure(exc):
+    """One line naming the status and whose side the failure is on."""
+    code = exc.code
+    reason = _HTTP_STATUS_REASONS.get(code)
+    if reason is None and 500 <= code < 600:
+        reason = "the feed host is having a server error"
+    text = "feed returned HTTP {}".format(code)
+    if reason:
+        text += " ({})".format(reason)
+    vercel = exc.headers.get("x-vercel-error") if exc.headers else None
+    if (isinstance(vercel, str) and 0 < len(vercel) <= _VERCEL_ERROR_MAX
+            and all(ch.isupper() or ch == "_" for ch in vercel)):
+        text += " [{}]".format(vercel)
+    return text
 
 
 def _open_no_redirect(req, timeout):
@@ -587,14 +618,16 @@ def sync_intel(out_path, *, url=FEED_URL, force=False,
                timeout=DEFAULT_TIMEOUT, fetcher=None):
     """Fetch, validate, normalize and write the intel files.
 
-    Returns {"status": synced|skipped|failed, "detail": ..., "stats": {...}}.
+    Returns {"status": synced|skipped|seeded|failed, "detail": ..., "stats": {...}}
+    ("seeded": the feed failed and the bundled offline copy filled a cold
+    volume; a "failed" result carries "kept", the revision still on the volume).
     Never raises: a failure here must never block the scan that triggered it.
     """
     if not force:
         if intel_is_fresh(out_path, ttl_seconds):
-            return {"status": "skipped", "detail": "within TTL", "stats": {}}
+            return _skip_or_seed(out_path, "within TTL")
         if attempt_is_recent(out_path, retry_seconds):
-            return {"status": "skipped", "detail": "within retry floor", "stats": {}}
+            return _skip_or_seed(out_path, "within retry floor")
 
     # Touched BEFORE the fetch: a hang that gets killed by the sidecar timeout
     # must still count as an attempt, or a wedged feed is retried every scan.
@@ -605,9 +638,9 @@ def sync_intel(out_path, *, url=FEED_URL, force=False,
         incidents = validate_envelope(payload)
     except FeedError as exc:
         # Previous derived files are left exactly as they were.
-        return {"status": "failed", "detail": str(exc), "stats": {}}
+        return _feed_unavailable(out_path, str(exc))
     except Exception as exc:  # never raise into a scan spawn
-        return {"status": "failed", "detail": "unexpected: {}".format(exc), "stats": {}}
+        return _feed_unavailable(out_path, "unexpected: {}".format(exc))
 
     try:
         norm = normalize(incidents)
@@ -626,6 +659,13 @@ def sync_intel(out_path, *, url=FEED_URL, force=False,
         # percentage heuristic here would reject good syncs.
         if not force and _indicator_total(norm) == 0:
             previous = _previous_indicator_total(out_path)
+            if previous == 0:
+                # Cold volume: an empty "success" would load as available=True
+                # and match nothing, so the bundled copy wins when it is usable.
+                # Without it, the first sync still goes through as before.
+                seeded = _try_install_seed(out_path)
+                if "revised" in seeded:
+                    return _seeded_result("feed carried no indicators at all", seeded)
             if previous > 0:
                 return {"status": "failed",
                         "detail": ("feed carried no indicators at all while {} "
@@ -653,6 +693,160 @@ def sync_intel(out_path, *, url=FEED_URL, force=False,
 
     return {"status": "synced", "detail": "revised={}".format(revised),
             "stats": norm["stats"]}
+
+
+def _feed_unavailable(out_path, reason):
+    """The live feed failed: keep what is on the volume, or seed a cold one.
+
+    Never raises (sync_intel's contract). The seed is installed ONLY when the
+    volume has no usable indicators, or holds an older seed; live data, however
+    old, is never replaced by the bundled copy because the copy drops the prose.
+    """
+    seeded = _try_install_seed(out_path)
+    if "revised" in seeded:
+        return _seeded_result(reason, seeded)
+    detail, kept = reason, ""
+    catalog = _current_catalog(out_path)
+    if catalog:
+        kept = catalog["revised"]
+        detail += "; existing catalog kept (feed revision {})".format(kept)
+    elif "error" in seeded:
+        detail += "; bundled offline copy unusable: {}".format(seeded["error"])
+    return {"status": "failed", "detail": detail, "stats": {}, "kept": kept}
+
+
+def _skip_or_seed(out_path, why):
+    """A skipped fetch still seeds an empty volume, from disk, with no network.
+
+    The TTL and the retry floor exist to spare the FEED. Without this, a volume
+    left empty by a recent failed attempt stayed empty until the floor expired,
+    even though the bundled copy needs no fetch at all. Deliberately does not
+    touch the attempt marker: no feed attempt happened.
+    """
+    if _current_catalog(out_path) is None:
+        seeded = _try_install_seed(out_path)
+        if "revised" in seeded:
+            return _seeded_result("live feed not retried ({})".format(why), seeded)
+    return {"status": "skipped", "detail": why, "stats": {}}
+
+
+def seed_if_empty(out_path):
+    """Install the bundled copy if the volume needs it; never fetches.
+
+    For air-gapped deploys (SCA_INTEL_AUTO_REFRESH=false), which never run a
+    sync and would otherwise keep an empty catalog forever. Same rules as the
+    fallback inside sync_intel: an empty volume or an older bundled copy is
+    seeded, a live catalog is never touched. Never raises.
+    """
+    seeded = _try_install_seed(out_path)
+    if "revised" in seeded:
+        return dict(_seeded_result("seed-only mode, no feed contacted", seeded),
+                    seed_only=True)
+    catalog = _current_catalog(out_path)
+    if catalog is not None:
+        return {"status": "skipped",
+                "detail": "catalog already present (feed revision {})".format(
+                    catalog["revised"]),
+                "stats": {}}
+    return {"status": "failed",
+            "detail": "bundled offline copy unusable: {}".format(
+                seeded.get("error", "unknown")),
+            "stats": {}, "kept": ""}
+
+
+def _seeded_result(reason, seeded):
+    return {"status": "seeded",
+            "detail": "{}; installed the bundled offline copy (feed revision "
+                      "{}, indicators only)".format(reason, seeded["revised"]),
+            "stats": seeded["stats"]}
+
+
+def _try_install_seed(out_path):
+    """_install_seed_if_needed that never raises; {} when nothing was needed."""
+    try:
+        return _install_seed_if_needed(out_path) or {}
+    except Exception as exc:
+        return {"error": "unexpected: {}".format(exc)}
+
+
+def _current_catalog(out_path):
+    """{'revised', 'source', 'seed_revised'} of the catalog on the volume, or None."""
+    if _previous_indicator_total(out_path) <= 0:
+        return None
+    try:
+        with open(os.path.join(out_path, MANIFEST_NAME)) as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return {"revised": _cap(manifest.get("revised")) or "unknown",
+            "source": _cap(manifest.get("source")),
+            "seed_revised": _cap(manifest.get("seed_revised"))}
+
+
+def _install_seed_if_needed(out_path):
+    """Install the bundled seed if the volume needs it.
+
+    Returns None when nothing was needed, {"revised", "stats"} on install, or
+    {"error"} when the seed itself was refused.
+    """
+    from . import intel_seed
+
+    catalog = _current_catalog(out_path)
+    if catalog is not None and catalog["source"] != intel_seed.SEED_SOURCE:
+        return None
+    try:
+        # Read at call time (not load_seed's bound defaults) so tests can point
+        # the sync at a missing or altered seed.
+        seed = intel_seed.load_seed(intel_seed.SEED_FILE, intel_seed.SEED_SHA256)
+    except intel_seed.SeedError as exc:
+        return {"error": str(exc)}
+    meta = seed["meta"]
+    # A seeded volume is only upgraded by a strictly newer seed (ISO dates sort).
+    if catalog is not None and catalog["seed_revised"] >= meta["revised"]:
+        return None
+
+    manifest = {
+        "feed_url": FEED_URL,
+        # Suffixed so every surface that shows the revision (finding property,
+        # graph, webapp) makes clear this is the bundled copy, not a live sync.
+        "revised": "{}-bundled".format(meta["revised"]),
+        "seed_revised": meta["revised"],
+        "source": intel_seed.SEED_SOURCE,
+        "fetched_at": meta["fetched_at"],
+        "count_reported": meta["count_reported"],
+        "count_ingested": meta["count_ingested"],
+        "stats": seed["stats"],
+    }
+    _write_all(out_path, seed["tables"], manifest)
+    # Back-date the manifest to when the snapshot was really fetched. Its mtime
+    # is the TTL marker, and a just-installed seed must not read as a fresh sync:
+    # that would suppress retries of the live feed for a whole TTL.
+    manifest_path = os.path.join(out_path, MANIFEST_NAME)
+    os.utime(manifest_path, (meta["fetched_at"], meta["fetched_at"]))
+    return {"revised": manifest["revised"], "stats": seed["stats"]}
+
+
+def describe_result(result):
+    """One operator-facing line for a sync_intel result."""
+    status, detail = result.get("status"), result.get("detail", "")
+    if status == "synced":
+        return "sca-intel: incident catalog synced ({}).".format(detail)
+    if status == "skipped":
+        return "sca-intel: nothing to do ({}).".format(detail)
+    if status == "seeded" and result.get("seed_only"):
+        return ("sca-intel: {}. Auto-refresh is off, so it stays until "
+                "'./redamon.sh sca-intel-sync' can reach the feed.".format(detail))
+    if status == "seeded":
+        return ("sca-intel: {}. The live feed is retried automatically and "
+                "replaces it once it answers.".format(detail))
+    if result.get("kept"):
+        return ("sca-intel: the live incident feed could not be used: {}. This is "
+                "an upstream problem, not a RedAmon one; supply-chain findings keep "
+                "using the stored catalog.".format(detail))
+    return ("sca-intel: sync failed: {}. No incident catalog is available, so "
+            "supply-chain findings carry no incident context.".format(detail))
 
 
 def _indicator_total(norm):
@@ -768,21 +962,32 @@ def _main(argv=None):
         description="Sync the supply-chain incident intel volume.")
     parser.add_argument("--out", required=True)
     parser.add_argument("--url", default=FEED_URL)
-    parser.add_argument("--force", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--force", action="store_true")
+    mode.add_argument("--seed-only", action="store_true",
+                      help="install the bundled offline copy if the volume is "
+                           "empty; never contact the feed (air-gapped deploys)")
     parser.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
     parser.add_argument("--retry-seconds", type=int, default=DEFAULT_RETRY_SECONDS)
     args = parser.parse_args(argv)
 
-    result = sync_intel(args.out, url=args.url, force=args.force,
-                        ttl_seconds=args.ttl_seconds,
-                        retry_seconds=args.retry_seconds)
+    if args.seed_only:
+        result = seed_if_empty(args.out)
+    else:
+        result = sync_intel(args.out, url=args.url, force=args.force,
+                            ttl_seconds=args.ttl_seconds,
+                            retry_seconds=args.retry_seconds)
+    # One stream, human line first: the orchestrator keeps only the log TAIL and
+    # greps it for the sentinel, so the sentinel must be the very last line. A
+    # second stream (stderr) interleaves nondeterministically in `docker logs`.
+    print(describe_result(result))
     # The drop report must be visible: counts, never silence.
     print(json.dumps(result, sort_keys=True))
-    if result["status"] == "synced":
+    if result["status"] in ("synced", "seeded"):
         # Sentinel the orchestrator greps for, so a TTL no-op is never logged as
-        # a sync that happened.
+        # a change to the volume. A seed install IS a change.
         print("__DID_SYNC__")
-    return 0 if result["status"] in ("synced", "skipped") else 1
+    return 0 if result["status"] in ("synced", "skipped", "seeded") else 1
 
 
 if __name__ == "__main__":

@@ -22,124 +22,12 @@ from urllib.parse import urlparse, parse_qs
 from graph_db.cpe_resolver import _is_ip_address
 from graph_db.cert_key import build_cert_key
 from graph_db.schema import NON_RECON_SOURCES
-
-
-#: Every relationship type a Technology node can carry, and which way it points
-#: relative to the Technology. Used when a versioned detection absorbs a
-#: versionless twin: each is re-parented before the twin is removed.
-#:
-#: USES_TECHNOLOGY    (Endpoint|Service|Port|IP) -> Technology
-#: HAS_TECHNOLOGY     (Port|IP|Parameter)        -> Technology
-#: HAS_KNOWN_CVE      Technology -> CVE
-#: HAS_VULNERABILITY  Technology -> Vulnerability   (GVM)
-_TECH_TWIN_RELATIONSHIPS = (
-    ("USES_TECHNOLOGY", "in"),
-    ("HAS_TECHNOLOGY", "in"),
-    ("HAS_KNOWN_CVE", "out"),
-    ("HAS_VULNERABILITY", "out"),
+from graph_db.technology_identity import (  # noqa: F401  re-exported for callers
+    TECH_RELATIONSHIPS as _TECH_TWIN_RELATIONSHIPS,
+    resolve_tech_name,
+    resolve_tech_version,
+    tech_name_key,
 )
-
-
-def resolve_tech_version(session, name: str, version: str,
-                         user_id: str, project_id: str) -> str:
-    """Return the version to MERGE a Technology node on, collapsing duplicates.
-
-    Technology identity is ``(name, version, user_id, project_id)`` and a
-    versionless detection is stored with ``version: ''`` (Neo4j cannot MERGE on
-    null, so the empty string is the sentinel). Two detectors disagreeing about
-    whether they can read a version therefore produced TWO nodes for the same
-    technology - observed live as React ``18.2.0`` (httpx) alongside React ``''``
-    (wappalyzer). That inflates technology counts, splits the graph view, and
-    can hide a version from version-based matching.
-
-    Both directions are handled:
-      - a versionless detection arrives and a versioned node already exists
-        -> reuse the versioned node, do not create the '' twin
-      - a versioned detection arrives and a versionless node exists
-        -> absorb it: move its USES_TECHNOLOGY edges onto the versioned node
-           and delete the twin
-
-    Returns the version string the caller should MERGE on.
-    """
-    if version:
-        # Absorb an existing versionless twin into this versioned node.
-        #
-        # Every relationship moves, not just USES_TECHNOLOGY. The original
-        # re-parented that one type and then DETACH DELETEd, so a twin that had
-        # already collected `(Port|IP)-[:HAS_TECHNOLOGY]->`, `-[:HAS_KNOWN_CVE]->`
-        # or GVM's `-[:HAS_VULNERABILITY]->` lost them silently - and the port
-        # scan, which reports versionless services, usually runs BEFORE the HTTP
-        # probe that supplies a version, so the twin normally HAS those edges.
-        session.run(
-            """
-            MERGE (new:Technology {name: $name, version: $version,
-                                   user_id: $uid, project_id: $pid})
-            SET new.updated_at = datetime()
-            """,
-            name=name, version=version, uid=user_id, pid=project_id,
-        )
-        for rel, direction in _TECH_TWIN_RELATIONSHIPS:
-            if direction == "in":
-                existing, moved = f"(other)-[r:`{rel}`]->(old)", f"(other)-[:`{rel}`]->(new)"
-            else:
-                existing, moved = f"(old)-[r:`{rel}`]->(other)", f"(new)-[:`{rel}`]->(other)"
-            # DELETE r is not optional: re-creating the edge on `new` without
-            # dropping it from `old` leaves the twin holding a relationship, and
-            # the zero-degree guard below then refuses to remove it forever.
-            session.run(
-                f"""
-                MATCH (old:Technology {{name: $name, version: '',
-                                       user_id: $uid, project_id: $pid}})
-                MATCH (new:Technology {{name: $name, version: $version,
-                                       user_id: $uid, project_id: $pid}})
-                WITH old, new
-                MATCH {existing}
-                MERGE {moved}
-                DELETE r
-                """,
-                name=name, version=version, uid=user_id, pid=project_id,
-            )
-
-        # Delete the twin only once it holds nothing. A relationship type this
-        # list does not know about would otherwise be destroyed with no trace;
-        # leaving a duplicate node behind is the far cheaper failure.
-        record = session.run(
-            """
-            MATCH (old:Technology {name: $name, version: '',
-                                   user_id: $uid, project_id: $pid})
-            WHERE NOT (old)--()
-            DELETE old
-            RETURN count(old) AS absorbed
-            """,
-            name=name, uid=user_id, pid=project_id,
-        ).single()
-        if record is not None and not record["absorbed"]:
-            leftover = session.run(
-                """
-                MATCH (old:Technology {name: $name, version: '',
-                                       user_id: $uid, project_id: $pid})-[r]-()
-                RETURN collect(DISTINCT type(r)) AS types
-                """,
-                name=name, uid=user_id, pid=project_id,
-            ).single()
-            if leftover and leftover["types"]:
-                print(f"[!][graph-db] versionless {name} twin kept: unmoved "
-                      f"relationship type(s) {leftover['types']} - add them to "
-                      f"_TECH_TWIN_RELATIONSHIPS")
-        return version
-
-    # Versionless detection: prefer an existing versioned node for this name.
-    rec = session.run(
-        """
-        MATCH (t:Technology {name: $name, user_id: $uid, project_id: $pid})
-        WHERE t.version <> ''
-        RETURN t.version AS version
-        ORDER BY t.version DESC
-        LIMIT 1
-        """,
-        name=name, uid=user_id, pid=project_id,
-    ).single()
-    return rec["version"] if rec and rec["version"] else ""
 
 
 def _split_url(url: str) -> tuple[str, str]:
@@ -315,9 +203,20 @@ class HttpMixin:
                             issuer=issuer_str, not_before=not_before, not_after=not_after,
                         )
 
+                        def _join(value):
+                            if isinstance(value, list):
+                                return ", ".join(str(v) for v in value if v)
+                            return value
+
                         cert_props = {
                             "subject_cn": subject_cn or None,
+                            "subject_dn": cert_data.get("subject_dn"),
+                            "subject_org": _join(cert_data.get("subject_org")),
                             "issuer": issuer_str,
+                            "issuer_cn": cert_data.get("issuer_cn"),
+                            "issuer_dn": cert_data.get("issuer_dn"),
+                            "issuer_org": _join(cert_data.get("issuer_org")),
+                            "serial": cert_data.get("serial"),
                             "not_before": not_before,
                             "not_after": not_after,
                             "san": cert_data.get("san", []),  # full SAN list as presented
@@ -330,6 +229,14 @@ class HttpMixin:
                             # thrown away every scan.
                             "jarm": (cert_data.get("jarm") or tls_data.get("jarm")
                                      or url_info.get("jarm")),
+                            # Same verdicts the tlsx writer stores. None means the
+                            # probe predates http_probe keeping them, and the
+                            # filter below drops it, so an unknown never overwrites
+                            # a verdict tlsx already wrote on the converged node.
+                            "expired": cert_data.get("expired"),
+                            "self_signed": cert_data.get("self_signed"),
+                            "mismatched": cert_data.get("mismatched"),
+                            "wildcard": cert_data.get("wildcard"),
                         }
                         if fingerprint:
                             cert_props["fingerprint_sha256"] = fingerprint
@@ -496,10 +403,13 @@ class HttpMixin:
                             # Remove None values
                             tech_props = {k: v for k, v in tech_props.items() if v is not None}
 
-                            # Collapse a versionless/versioned twin of the same
-                            # technology onto one node before merging.
+                            # Land on the node another detector already wrote,
+                            # whatever its spelling or version presence.
+                            tech_name = resolve_tech_name(
+                                session, tech_name, user_id, project_id)
                             tech_version = resolve_tech_version(
                                 session, tech_name, tech_version, user_id, project_id)
+                            tech_props["name"] = tech_name
                             tech_props["version"] = tech_version
 
                             # Create Technology node (unique by name + version + tenant)
@@ -513,7 +423,7 @@ class HttpMixin:
                                     name=tech_name, version=tech_version, props=tech_props,
                                     user_id=user_id, project_id=project_id
                                 )
-                                processed_techs.add((tech_name, tech_version))
+                                processed_techs.add((tech_name_key(tech_name), tech_version))
                             else:
                                 session.run(
                                     """
@@ -524,7 +434,7 @@ class HttpMixin:
                                     name=tech_name, props=tech_props,
                                     user_id=user_id, project_id=project_id
                                 )
-                                processed_techs.add((tech_name, None))
+                                processed_techs.add((tech_name_key(tech_name), None))
                             stats["technologies_created"] += 1
 
                             # Create relationship: Endpoint -[:USES_TECHNOLOGY]-> Technology
@@ -576,14 +486,19 @@ class HttpMixin:
                             ai_detected_by = "httpx-ai-header"
 
                         try:
+                            # MERGE on the version too: a MERGE without it creates
+                            # a NULL-version node the uniqueness constraint ignores.
+                            ai_tech = resolve_tech_name(session, ai_name, user_id, project_id)
+                            ai_version = resolve_tech_version(
+                                session, ai_tech, "", user_id, project_id)
                             session.run(
                                 """
-                                MERGE (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
+                                MERGE (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
                                 SET t.category = $category,
                                     t.source = 'ai-surface-recon',
                                     t.updated_at = datetime()
                                 """,
-                                name=ai_name, category=ai_category,
+                                name=ai_tech, version=ai_version, category=ai_category,
                                 user_id=user_id, project_id=project_id,
                             )
                             stats.setdefault("ai_technologies_created", 0)
@@ -592,12 +507,13 @@ class HttpMixin:
                             session.run(
                                 """
                                 MATCH (e:Endpoint {path: $path, method: 'GET', baseurl: $base_url, user_id: $user_id, project_id: $project_id})
-                                MATCH (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
+                                MATCH (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
                                 MERGE (e)-[r:USES_TECHNOLOGY]->(t)
                                 SET r.detected_by = $detected_by,
                                     r.confidence = coalesce(r.confidence, 100)
                                 """,
-                                path=path, base_url=base_url, name=ai_name, detected_by=ai_detected_by,
+                                path=path, base_url=base_url, name=ai_tech, version=ai_version,
+                                detected_by=ai_detected_by,
                                 user_id=user_id, project_id=project_id,
                             )
                             stats["relationships_created"] += 1
@@ -617,11 +533,12 @@ class HttpMixin:
                             tech_name = wap_tech.get("name", "")
                             tech_version = wap_tech.get("version")  # Can be None
 
-                            # Skip if already processed from httpx
-                            if (tech_name, tech_version) in processed_techs:
+                            # Skip if already processed from httpx. Case-blind:
+                            # the two spell some products differently.
+                            if (tech_name_key(tech_name), tech_version) in processed_techs:
                                 continue
                             # Also skip if httpx found it without version but wappalyzer has version
-                            if (tech_name, None) in processed_techs:
+                            if (tech_name_key(tech_name), None) in processed_techs:
                                 continue
 
                             categories = wap_tech.get("categories", [])
@@ -643,8 +560,11 @@ class HttpMixin:
                             # Same twin-collapsing as the httpx path above: the two
                             # detectors disagree on version presence often (React
                             # 18.2.0 from httpx vs bare React from wappalyzer).
+                            tech_name = resolve_tech_name(
+                                session, tech_name, user_id, project_id)
                             tech_version = resolve_tech_version(
                                 session, tech_name, tech_version, user_id, project_id)
+                            tech_props["name"] = tech_name
                             tech_props["version"] = tech_version
 
                             # Create Technology node

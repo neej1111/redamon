@@ -171,6 +171,69 @@ for t in scan_versions scan_jobs scan_schedules; do
   expect_eq "project delete cascades $t (snapshot bytes go with it)" "0" "$got"
 done
 
+# ------------------------------------ P0-2: rollback of a refused start -------
+# A start the orchestrator REFUSES must cost the user nothing. Before P0-2 the
+# freeze ran first and carried retention with it, so retrying a 403 in a loop
+# minted a version, stored a duplicate snapshot and evicted the oldest saved
+# one. rollbackPreparedVersions undoes the freeze in ONE transaction; these
+# assert the database-level result of that transaction, and the referential
+# hazard it runs into.
+SUF2="rb_$(date +%s)_$$"
+U2="user_$SUF2"
+P2="proj_$SUF2"
+q "insert into users (id, name, email, password, role, created_at, updated_at)
+   values ('$U2', 'rb test', '$U2@test.local', 'x', 'standard', now(), now())" >/dev/null
+q "insert into projects (id, user_id, name, target_domain, created_at, updated_at)
+   values ('$P2', '$U2', 'rb', 'rb.test', now(), now())" >/dev/null
+
+# The pre-start state: v1 current, carrying a snapshot and a run history row.
+q "insert into scan_versions (id, project_id, seq, label, is_current, pinned, node_count, link_count, snapshot, created_at, updated_at)
+   values ('v1_$SUF2', '$P2', 1, 'Scan 1', true, false, 100, 200, '\\x1f8b'::bytea, now(), now())" >/dev/null
+q "insert into scan_jobs (id, project_id, version_id, kind, run_id, trigger, mode, status, created_at, updated_at)
+   values ('j1_$SUF2', '$P2', 'v1_$SUF2', 'full_recon', '', 'manual', 'new', 'completed', now(), now())" >/dev/null
+
+# prepareVersionsForFullScan: freeze v1 (demote + store snapshot), mint v2.
+q "update scan_versions set is_current = false where id = 'v1_$SUF2'" >/dev/null
+q "insert into scan_versions (id, project_id, seq, label, is_current, pinned, created_at, updated_at)
+   values ('v2_$SUF2', '$P2', 2, 'Scan 2', true, false, now(), now())" >/dev/null
+expect_eq "after the freeze there are 2 versions" "2" \
+  "$(q "select count(*) from scan_versions where project_id='$P2'")"
+
+# The orchestrator refuses -> rollbackPreparedVersions, in ONE transaction.
+q "begin;
+   delete from scan_versions where id = 'v2_$SUF2';
+   update scan_versions set is_current = true, snapshot = null where id = 'v1_$SUF2';
+   commit;" >/dev/null
+
+expect_eq "a refused start leaves the version COUNT unchanged" "1" \
+  "$(q "select count(*) from scan_versions where project_id='$P2'")"
+expect_eq "the frozen version is current again" "t" \
+  "$(q "select is_current from scan_versions where id='v1_$SUF2'")"
+expect_eq "exactly ONE version is current" "1" \
+  "$(q "select count(*) from scan_versions where project_id='$P2' and is_current")"
+expect_eq "the duplicate snapshot is cleared" "t" \
+  "$(q "select snapshot is null from scan_versions where id='v1_$SUF2'")"
+expect_eq "the minted version is gone" "0" \
+  "$(q "select count(*) from scan_versions where id='v2_$SUF2'")"
+# The run history must survive the rollback: it hangs off v1, not v2.
+expect_eq "prior run history survives the rollback" "1" \
+  "$(q "select count(*) from scan_jobs where id='j1_$SUF2'")"
+
+# REFERENTIAL HAZARD: scan_jobs.version_id is ON DELETE CASCADE, so deleting
+# the minted version takes any job row pointing at it. Today the minted version
+# is brand new and has none - the per-project mutex keeps a second start out
+# until the first finishes - but if that ever stops holding, the rollback would
+# silently delete run history. Pinned so the cascade is a known property.
+q "insert into scan_versions (id, project_id, seq, label, is_current, pinned, created_at, updated_at)
+   values ('v3_$SUF2', '$P2', 3, 'Scan 3', false, false, now(), now())" >/dev/null
+q "insert into scan_jobs (id, project_id, version_id, kind, run_id, trigger, mode, status, created_at, updated_at)
+   values ('j3_$SUF2', '$P2', 'v3_$SUF2', 'full_recon', '', 'manual', 'new', 'running', now(), now())" >/dev/null
+q "delete from scan_versions where id = 'v3_$SUF2'" >/dev/null
+expect_eq "deleting a version CASCADES its scan_jobs (known hazard for rollback)" "0" \
+  "$(q "select count(*) from scan_jobs where id='j3_$SUF2'")"
+
+q "delete from users where id = '$U2'" >/dev/null
+
 echo
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

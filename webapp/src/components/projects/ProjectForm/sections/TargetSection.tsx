@@ -1,13 +1,14 @@
 'use client'
 
 import { useState, useMemo, useEffect } from 'react'
-import { ChevronDown, Target, ShieldAlert, AlertTriangle, Globe, Network, Layers, Check, Lock } from 'lucide-react'
+import { ChevronDown, Target, ShieldAlert, AlertTriangle, Globe, Network, Layers, Check, Lock, Plus, Minus, Gauge } from 'lucide-react'
 import { AiToggleLabel } from '../AiToggleLabel'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import { isHardBlockedDomain } from '@/lib/hard-guardrail'
 import { classifyIpTargets } from '@/lib/ip-target-utils'
 import { validateDomainBatch, MAX_BATCH_HOSTS, MAX_BATCH_GROUPS } from '@/lib/domainBatch'
+import { deriveRoeEnabled } from '@/lib/engagement'
 import { FileImportButton } from '../FileImportButton'
 import { ModelPicker } from '@/components/shared/ModelPicker'
 import { useProject } from '@/providers/ProjectProvider'
@@ -44,6 +45,8 @@ function toStoredPrefixes(displayValue: string, includeRoot: boolean): string[] 
   return prefixes
 }
 
+const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+
 // Helper to parse IP textarea into array
 function parseIpList(text: string): string[] {
   return text
@@ -71,6 +74,54 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
   const ipMode = data.ipMode || false
   const batchMode = data.domainBatchMode || false
   const targetMode: TargetMode = ipMode ? 'ip' : batchMode ? 'batch' : 'domain'
+
+  // Whether the engagement's limits are live, DERIVED from whether any is set.
+  // Computed for display only and never written into the form's data: a derived
+  // value in `formData` would make the form permanently dirty and fire the
+  // unsaved-changes guard on every navigation.
+  const limitsActive = deriveRoeEnabled(data)
+  const activeLimits = [
+    data.roeGlobalMaxRps > 0 ? 'a rate ceiling' : null,
+    (data.roeExcludedHosts || []).some(h => String(h).trim() !== '') ? 'an excluded-host list' : null,
+    data.roeTimeWindowEnabled ? 'a scanning time window' : null,
+  ].filter(Boolean) as string[]
+
+  // The excluded-host editor writes the host and its reason together, because
+  // the two arrays are positional: editing one without the other silently
+  // re-pairs every reason below it with the wrong host.
+  const addExcludedHost = () => {
+    updateField('roeExcludedHosts', [...(data.roeExcludedHosts || []), ''])
+    updateField('roeExcludedHostReasons', [...(data.roeExcludedHostReasons || []), ''])
+  }
+
+  const removeExcludedHost = (index: number) => {
+    const hosts = [...(data.roeExcludedHosts || [])]
+    const reasons = [...(data.roeExcludedHostReasons || [])]
+    hosts.splice(index, 1)
+    reasons.splice(index, 1)
+    updateField('roeExcludedHosts', hosts)
+    updateField('roeExcludedHostReasons', reasons)
+  }
+
+  const updateExcludedHost = (index: number, value: string) => {
+    const hosts = [...(data.roeExcludedHosts || [])]
+    hosts[index] = value
+    updateField('roeExcludedHosts', hosts)
+  }
+
+  const updateExcludedReason = (index: number, value: string) => {
+    const reasons = [...(data.roeExcludedHostReasons || [])]
+    reasons[index] = value
+    updateField('roeExcludedHostReasons', reasons)
+  }
+
+  const toggleDay = (day: string) => {
+    const days = data.roeTimeWindowDays || []
+    updateField(
+      'roeTimeWindowDays',
+      days.includes(day) ? days.filter(d => d !== day) : [...days, day]
+    )
+  }
 
   // Domain batch: group the pasted hostnames with the SAME helper the server uses
   // to persist them, so the preview cannot promise a grouping the scan won't run.
@@ -825,6 +876,174 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
               </div>
             </>
           )}
+
+          {/* --- Engagement limits ------------------------------------------------
+              The eight limits that configure no single module: they cap every
+              tool, filter every phase, or gate the whole run. That is the rule
+              that puts them here and keeps everything else out - a tool's own
+              setting belongs beside that tool, not in a shared drawer.
+
+              There is no master switch, deliberately. It used to be one
+              (`roeEnabled`), and a switch whose only function is to disable
+              other safety fields is a bypass by design: one write of false and
+              the ceiling, the exclusions and the window all stopped applying at
+              once, with every field still showing its configured value. The
+              status line below reports the DERIVED answer instead, and it is
+              never part of the form's data, so it cannot make the form dirty. */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>
+              <Gauge size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+              Engagement limits
+            </h3>
+            <p className={styles.sectionDescription}>
+              Enforced at scan start whatever any tool&apos;s own setting says, and reachable
+              from the API in exactly the same way. Changing one applies to the NEXT scan.
+            </p>
+
+            <div
+              className={styles.fieldHint}
+              style={{
+                padding: '8px 10px',
+                borderRadius: 6,
+                borderLeft: `3px solid var(${limitsActive ? '--color-success, #22c55e' : '--color-border, #444'})`,
+                background: 'var(--color-surface-alt, rgba(255,255,255,0.03))',
+                marginBottom: 'var(--space-3)',
+              }}
+            >
+              {limitsActive
+                ? `Limits are ACTIVE because ${activeLimits.join(' and ')} ${activeLimits.length === 1 ? 'is' : 'are'} set.`
+                : 'No limits are active: set a rate ceiling, exclude a host, or restrict the ' +
+                  'scanning window. Every tool runs at whatever rate its own setting says.'}
+              {/* A third-party engagement is REFUSED without a ceiling rather
+                  than merely unconstrained, so the generic line above
+                  understates it by exactly the amount that matters. */}
+              {data.engagementKind === 'third_party' && !(data.roeGlobalMaxRps > 0) && (
+                <strong style={{ display: 'block', marginTop: 4, color: 'var(--color-danger, #d33)' }}>
+                  This is a third-party engagement, so a scan will be REFUSED until a
+                  request-rate ceiling is set here.
+                </strong>
+              )}
+            </div>
+
+            <div className={styles.fieldRow}>
+              <div className={styles.fieldGroup}>
+                <label className={styles.fieldLabel} htmlFor="engagement-max-rps">
+                  Global max requests/sec
+                </label>
+                <input
+                  id="engagement-max-rps"
+                  className="textInput"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={data.roeGlobalMaxRps}
+                  onChange={(e) => updateField('roeGlobalMaxRps', parseInt(e.target.value) || 0)}
+                />
+                <span className={styles.fieldHint}>
+                  Caps every tool&apos;s rate at scan start, including the ones whose own value
+                  means &ldquo;unlimited&rdquo;. <strong>0 means NO ceiling</strong>, not a slow
+                  one.
+                </span>
+              </div>
+            </div>
+
+            <div className={styles.fieldGroup}>
+              <label className={styles.fieldLabel}>Never-touch hosts</label>
+              <span className={styles.fieldHint}>
+                IPs or domains that must NEVER be scanned, even though they fall inside the
+                target scope. Dropped from expanded IPs, from discovered subdomains, and from
+                the target domain itself.
+              </span>
+              {(data.roeExcludedHosts || []).map((host, i) => (
+                <div key={i} className={styles.fieldRow} style={{ alignItems: 'flex-end' }}>
+                  <div className={styles.fieldGroup} style={{ flex: 1 }}>
+                    <input
+                      className="textInput"
+                      value={host}
+                      onChange={(e) => updateExcludedHost(i, e.target.value)}
+                      placeholder="IP or domain"
+                      aria-label={`Excluded host ${i + 1}`}
+                    />
+                  </div>
+                  <div className={styles.fieldGroup} style={{ flex: 1 }}>
+                    <input
+                      className="textInput"
+                      value={(data.roeExcludedHostReasons || [])[i] || ''}
+                      onChange={(e) => updateExcludedReason(i, e.target.value)}
+                      placeholder="Why excluded"
+                      aria-label={`Exclusion reason ${i + 1}`}
+                    />
+                  </div>
+                  <button type="button" className="secondaryButton" onClick={() => removeExcludedHost(i)}
+                    style={{ marginBottom: 4 }} aria-label={`Remove excluded host ${i + 1}`}>
+                    <Minus size={14} />
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="secondaryButton" onClick={addExcludedHost}
+                style={{ width: 'fit-content', marginTop: 4 }}>
+                <Plus size={14} /> Add excluded host
+              </button>
+            </div>
+
+            <div className={styles.toggleRow} style={{ gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span className={styles.toggleLabel}>Restrict scanning to a time window</span>
+                <p className={styles.toggleDescription}>
+                  Outside the window the orchestrator refuses a scan start outright, so a
+                  nightly job scheduled outside it will not run.
+                </p>
+              </div>
+              <Toggle
+                checked={data.roeTimeWindowEnabled}
+                onChange={(checked) => updateField('roeTimeWindowEnabled', checked)}
+              />
+            </div>
+
+            {data.roeTimeWindowEnabled && (
+              <>
+                <div className={styles.fieldRow}>
+                  <div className={styles.fieldGroup}>
+                    <label className={styles.fieldLabel} htmlFor="engagement-window-tz">
+                      Timezone
+                    </label>
+                    <input id="engagement-window-tz" className="textInput"
+                      value={data.roeTimeWindowTimezone}
+                      onChange={(e) => updateField('roeTimeWindowTimezone', e.target.value)}
+                      placeholder="e.g. Europe/Rome, America/New_York" />
+                  </div>
+                  <div className={styles.fieldGroup}>
+                    <label className={styles.fieldLabel} htmlFor="engagement-window-start">
+                      Start time
+                    </label>
+                    <input id="engagement-window-start" className="textInput" type="time"
+                      value={data.roeTimeWindowStartTime}
+                      onChange={(e) => updateField('roeTimeWindowStartTime', e.target.value)} />
+                  </div>
+                  <div className={styles.fieldGroup}>
+                    <label className={styles.fieldLabel} htmlFor="engagement-window-end">
+                      End time
+                    </label>
+                    <input id="engagement-window-end" className="textInput" type="time"
+                      value={data.roeTimeWindowEndTime}
+                      onChange={(e) => updateField('roeTimeWindowEndTime', e.target.value)} />
+                  </div>
+                </div>
+                <div className={styles.fieldGroup}>
+                  <label className={styles.fieldLabel}>Allowed days</label>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {WEEKDAYS.map(day => (
+                      <label key={day} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={(data.roeTimeWindowDays || []).includes(day)}
+                          onChange={() => toggleDay(day)} />
+                        {day.charAt(0).toUpperCase() + day.slice(1, 3)}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
 
           <div className={styles.subSection}>
             <h3 className={styles.subSectionTitle}>Stealth Mode</h3>

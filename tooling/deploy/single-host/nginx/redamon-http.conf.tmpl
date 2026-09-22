@@ -6,11 +6,18 @@
 # and the ip-allowlist gate are all PRESERVED -- only transport encryption is gone. With no
 # TLS the gate is the PRIMARY control, not defense-in-depth.
 #
-# Tokens: __SERVER_NAME__ __CSP_CONNECT__ __GATE__ __HTTP_PORT__ __CSP_HEADER_NAME__ __WS_AUTH_REQUEST__
+# Tokens: __SERVER_NAME__ __CSP_CONNECT__ __GATE__ __MCP_GATE__ __HTTP_PORT__ __CSP_HEADER_NAME__
+#         __WS_AUTH_REQUEST__
 
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
 limit_req_zone $binary_remote_addr zone=api:10m   rate=30r/s;
+# Inbound MCP server. Present in the HTTP template too so a request never falls
+# through to `location /api/` and consumes the UI's budget -- even though
+# deploy.sh REFUSES to enable MCP in http-* modes (a bearer token would cross
+# the wire in plaintext on every call). If the flag is ever set by hand on the
+# host, this keeps the endpoint correctly scoped rather than silently mis-routed.
+limit_req_zone $binary_remote_addr zone=mcp:10m   rate=10r/s;
 limit_conn_zone $binary_remote_addr zone=conn:10m;
 # server_tokens is set per-server (below), NOT at http level -- avoids a fatal
 # "duplicate directive" when the base nginx.conf http{} already declares one.
@@ -78,6 +85,24 @@ server {
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy strict-origin-when-cross-origin always;
         add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet" always;
+        add_header Cache-Control "no-store" always;
+    }
+    # EXACT match: a prefix block written `/api/mcp-server/` does NOT match the
+    # endpoint URL `/api/mcp-server`, and the request would fall through to
+    # `location /api/` below with the UI rate zone and the server's gate.
+    location = /api/mcp-server {
+        limit_req zone=mcp burst=20 nodelay; limit_req_status 429;
+        limit_req_log_level warn;
+        client_max_body_size 64k;
+        # __MCP_GATE__
+        include /etc/nginx/snippets/redamon-proxy-common.conf;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_read_timeout 3600s; proxy_buffering off;
+        # Re-stated via the shared snippet (a location with any add_header stops
+        # inheriting the server-level set). No HSTS here: this template is the
+        # plaintext one.
+        include /etc/nginx/snippets/redamon-security-headers-only.conf;
+        add_header __CSP_HEADER_NAME__ "default-src 'none'; frame-ancestors 'none'" always;
         add_header Cache-Control "no-store" always;
     }
     location /api/ {

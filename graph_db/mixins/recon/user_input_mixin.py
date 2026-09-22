@@ -239,7 +239,8 @@ class UserInputMixin:
                                     """
                                     MATCH (s:Subdomain {name: $sub, user_id: $uid, project_id: $pid})
                                     MATCH (i:IP {address: $ip, user_id: $uid, project_id: $pid})
-                                    MERGE (s)-[:RESOLVES_TO {record_type: $rt}]->(i)
+                                    MERGE (s)-[r:RESOLVES_TO]->(i)
+                                    SET r.record_type = coalesce(r.record_type, $rt)
                                     """,
                                     sub=subdomain, ip=ip_addr, rt=record_type,
                                     uid=user_id, pid=project_id,
@@ -401,8 +402,8 @@ class UserInputMixin:
                     OPTIONAL MATCH (d:Domain {user_id: $uid, project_id: $pid})
                     OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->(s:Subdomain)-[:RESOLVES_TO]->(i:IP)-[:HAS_PORT]->(p:Port)
                     OPTIONAL MATCH (d)-[:RESOLVES_TO]->(di:IP)-[:HAS_PORT]->(dp:Port)
-                    OPTIONAL MATCH (p)-[:HAS_SERVICE]->(:Service)-[:SERVES_URL]->(bu:BaseURL)
-                    OPTIONAL MATCH (dp)-[:HAS_SERVICE]->(:Service)-[:SERVES_URL]->(dbu:BaseURL)
+                    OPTIONAL MATCH (p)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->(bu:BaseURL)
+                    OPTIONAL MATCH (dp)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->(dbu:BaseURL)
                     WITH d, count(DISTINCT s) AS sub_count,
                          count(DISTINCT i) + count(DISTINCT di) AS ip_count,
                          count(DISTINCT p) + count(DISTINCT dp) AS port_count,

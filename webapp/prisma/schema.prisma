@@ -29,6 +29,7 @@ model User {
   chatSkills      UserChatSkill[]
   projectPresets  UserProjectPreset[]
   tradecraftResources UserTradecraftResource[]
+  mcpTokens       McpAccessToken[]
   settings        UserSettings?
   uiPreferences Json              @default("{}") @map("ui_preferences")
   // Per-user remembered model choices, used to pre-fill new projects.
@@ -43,6 +44,45 @@ model User {
   updatedById   String?           @map("updated_by_id")
 
   @@map("users")
+}
+
+/// A personal access token for the INBOUND MCP server (/api/mcp-server), which
+/// lets an external agent act as one RedAmon user.
+///
+/// Per USER, never per project: it carries no projectId, so which projects it
+/// reaches is decided per call by the ownership check. A project created after
+/// the token is therefore reachable without re-minting.
+///
+/// Only the sha256 of the token is stored. sha256 rather than bcrypt is correct
+/// here: the token is high-entropy random, so a password work factor would only
+/// add latency to every MCP call without making a brute force meaningfully
+/// harder.
+model McpAccessToken {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  /// First 8 characters of the plaintext. DISPLAY ONLY - never used to look a
+  /// token up, so it is not a partial credential.
+  tokenPrefix String    @map("token_prefix")
+  tokenHash   String    @unique @map("token_hash")
+  /// ENFORCED on every call. An unknown scope rejects the whole token.
+  scopes      String[]  @default(["recon:read"])
+  /// Why this token exists: the job it was minted for. Drives the recommended
+  /// scopes at mint and the generated Agent Onboarding pack.
+  ///
+  /// NOT an authorization input. Nothing in resolveMcpToken, requireScope, the
+  /// rate limiter or any tool body reads it, and profiles.test.ts asserts that.
+  /// A token's power is exactly its `scopes`, whatever this says. Nullable, so
+  /// every row minted before profiles existed is valid and reads as "custom".
+  profile     String?
+  lastUsedAt  DateTime? @map("last_used_at")
+  expiresAt   DateTime? @map("expires_at")
+  revokedAt   DateTime? @map("revoked_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("mcp_access_tokens")
 }
 
 model UserLlmProvider {
@@ -1036,6 +1076,12 @@ model Project {
   agentBruteforceSpeed                  Int      @default(5) @map("agent_bruteforce_speed")
   agentGuardrailEnabled                 Boolean  @default(true) @map("agent_guardrail_enabled")
 
+  // Per-project opt-in for kali_exec over the INBOUND MCP server. Default false,
+  // and denied to update_recon_settings by name: a token that could set this
+  // would be granting itself the one capability on that surface which reaches a
+  // live target outside a scan. Only a human in the project form turns it on.
+  mcpKaliExecEnabled                    Boolean  @default(false) @map("mcp_kali_exec_enabled")
+
   // Fireteam (multi-agent) Settings
   fireteamEnabled                       Boolean  @default(true)            @map("fireteam_enabled")
   fireteamMaxConcurrent                 Int      @default(5)               @map("fireteam_max_concurrent")
@@ -1210,8 +1256,50 @@ model Project {
   // that no longer exists.
   triageReviewBudget                Int      @default(150)   @map("triage_review_budget")
 
-  // ========== RULES OF ENGAGEMENT ==========
+  // ========== ENGAGEMENT ==========
+  /// Who the target belongs to, and therefore what has to be true before a scan
+  /// may start. `internal` is our own estate; `third_party` is somebody else's,
+  /// and a third_party project must carry a rate ceiling AND an authorization
+  /// record or start_recon refuses it.
+  ///
+  /// Set at creation and immutable afterwards, for the same reason the target
+  /// is: converting a project from internal to third_party after the fact would
+  /// retroactively claim an authority nobody granted, and the other direction
+  /// would drop a ceiling a human put there.
+  ///
+  /// Every row that predates this column is backfilled to `internal`, which is
+  /// what keeps existing projects working. It also means the defect it closes -
+  /// a project with no rate ceiling at all - is closed for NEW projects only,
+  /// so the UI and preflight_scope_check both flag an unceilinged project
+  /// prominently rather than letting it pass quietly.
+  /// internal | third_party
+  engagementKind              String   @default("internal") @map("engagement_kind")
+  /// A header every request carries so the target's operators can attribute the
+  /// traffic to this engagement, e.g. "X-Bug-Bounty: researcher-handle". Empty
+  /// means none is sent. Format is `Name: value` and it is validated like any
+  /// other custom header.
+  engagementIdentityHeader    String   @default("") @map("engagement_identity_header")
+
+  engagementAuthorizations    EngagementAuthorization[]
+
+  // ========== THE ENGAGEMENT ==========
+  // Two unrelated things share the `roe` prefix, and the columns keep their
+  // names on purpose - renaming fifteen buys nothing and costs a migration.
+  // What tells them apart is recon_settings/registry.yaml, never the prefix:
+  //
+  //   group: engagement_limits         enforced at scan start. Ordinary settings
+  //   deny_reason: engagement-record   the contract. UI-only; nothing enforces it
+  //
+  // Anything that needs "the engagement" asks the registry, because a name
+  // prefix survives a reclassification by accident.
   // --- Document & Metadata ---
+  /// DERIVED, never written. Kept so old rows and old export bundles still load.
+  /// The engagement's limits apply when there IS a limit to apply: a non-zero
+  /// roeGlobalMaxRps, OR a non-empty roeExcludedHosts, OR roeTimeWindowEnabled.
+  /// recon_settings/engagement.py computes it for recon, the agent and the
+  /// orchestrator; deriveRoeEnabled in webapp/src/lib/engagement.ts is the
+  /// TypeScript half, pinned to it by a shared fixture table. Read it nowhere
+  /// else: as a writable master switch it was a bypass shipped as a checkbox.
   roeEnabled                  Boolean  @default(false) @map("roe_enabled")
   roeRawText                  String   @default("") @map("roe_raw_text") @db.Text
   roeDocumentName             String   @default("") @map("roe_document_name")
@@ -1388,6 +1476,105 @@ model ScanVersion {
 }
 
 // Run history for the timeline table + scheduler. One row per full-scan attempt.
+/// What authorized an engagement.
+///
+/// A project used to carry no link to the document that permitted it. Given
+/// that an agent can now create projects and reach every pipeline parameter,
+/// "who said you could scan this" needs an answer that survives the token that
+/// made the claim.
+///
+/// APPEND-ONLY. Never updated, never deleted through any code path. When a
+/// program changes its scope a NEW row records that the engagement continued
+/// under a new authority from that moment, which is exactly what an incident
+/// review needs; a row that can be edited is not evidence. Prisma has no
+/// immutability primitive, so this is enforced by a Postgres rule as well as by
+/// the absence of any update path in code.
+///
+/// Only a DIGEST of the scope document is stored, never the document. That
+/// keeps the model free of any one program format - a HackerOne policy, a
+/// Bugcrowd brief, a signed PDF or an internal ticket all reduce to the same
+/// four fields - and means the registry never parses somebody's scope prose.
+model EngagementAuthorization {
+  id               String   @id @default(cuid())
+  projectId        String   @map("project_id")
+  /// Restrict, not Cascade. Every other Project child cascades, which would
+  /// destroy the record of what authorized a project the moment the project was
+  /// deleted - the one thing an incident review needs most. Deleting a project
+  /// copies its authorizations to the retention table first.
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  /// sha256 of the scope document, lower-case hex.
+  documentSha256   String   @map("document_sha256")
+  /// hackerone_program | bugcrowd_program | roe_document | internal_ticket | other
+  documentKind     String   @map("document_kind")
+  /// Where the scope came from, e.g. the program policy URL.
+  sourceUrl        String   @default("") @map("source_url")
+  /// e.g. "nba-public". Null when the source has no program concept.
+  programHandle    String?  @map("program_handle")
+  /// When the scope document itself was issued or generated.
+  issuedAt         DateTime @map("issued_at")
+  /// Server clock. Never client-supplied: a recordedAt a caller can choose is a
+  /// timestamp that proves nothing.
+  recordedAt       DateTime @default(now()) @map("recorded_at")
+  /// mcp | ui | import
+  recordedVia      String   @default("mcp") @map("recorded_via")
+  /// The MCP token id that wrote this, so a revoked credential is still
+  /// attributable. Null when a human recorded it through the UI.
+  recordedByTokenId String? @map("recorded_by_token_id")
+  /// The user who recorded it, whichever route it came through.
+  recordedByUserId String?  @map("recorded_by_user_id")
+  /// One line, e.g. "428 in-scope, 28 excluded, 3 rps ceiling".
+  summary          String   @default("") @map("summary")
+  /// The idempotency key create_project used, when this record was written as
+  /// part of one. A retried agent run returns the existing project rather than
+  /// creating a second, which matters because the bug-bounty loop runs
+  /// unattended and a retry is its normal failure path.
+  idempotencyKey   String?  @unique @map("idempotency_key")
+
+  scanJobs         ScanJob[]
+
+  @@index([projectId, recordedAt])
+  @@index([documentSha256])
+  @@map("engagement_authorizations")
+}
+
+/// Where an engagement's authorization records go when the PROJECT is deleted.
+///
+/// It is a Prisma model rather than raw SQL for one reason, found by driving the
+/// MCP create path end to end: `prisma db push --accept-data-loss` drops every
+/// table the schema does not know about, and this is the table the delete path
+/// writes to before it is allowed to remove a project. Kept outside the schema,
+/// it survived only until the next push - and in the window between that push
+/// and the next webapp boot (which re-applies it) EVERY project holding an
+/// authorization record became undeletable, failing with an opaque 500. Since
+/// `db push` is how this repo applies schema changes, that window was ordinary
+/// working practice rather than an edge case.
+///
+/// It deliberately carries no relation to Project: the whole point is that the
+/// record outlives the project, so a foreign key would defeat it. The append-only
+/// trigger on the live table still has to be re-applied on every boot, because
+/// Prisma has no primitive for one.
+model EngagementAuthorizationArchive {
+  id                String   @id
+  /// The project that was deleted. Not a relation, by design: the row exists
+  /// precisely because that project no longer does.
+  projectId         String   @map("project_id")
+  documentSha256    String   @map("document_sha256")
+  documentKind      String   @map("document_kind")
+  sourceUrl         String   @default("") @map("source_url")
+  programHandle     String?  @map("program_handle")
+  issuedAt          DateTime @map("issued_at")
+  recordedAt        DateTime @map("recorded_at")
+  recordedVia       String   @map("recorded_via")
+  recordedByTokenId String?  @map("recorded_by_token_id")
+  recordedByUserId  String?  @map("recorded_by_user_id")
+  summary           String   @default("") @map("summary")
+  archivedAt        DateTime @default(now()) @map("archived_at")
+  archivedReason    String   @default("project_deleted") @map("archived_reason")
+
+  @@index([projectId])
+  @@map("engagement_authorization_archive")
+}
+
 model ScanJob {
   id                 String       @id @default(cuid())
   projectId          String       @map("project_id")
@@ -1417,6 +1604,19 @@ model ScanJob {
   schedule           ScanSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   ramReason          String?      @map("ram_reason")
   nodeCount          Int?         @map("node_count")
+  /// The sha256 of the scan-steering settings this run actually started with,
+  /// the same digest JobQueue computes at enqueue and recomputed here for a
+  /// direct run. Without it the chain from a graph node back to the
+  /// configuration that produced it breaks: JobQueue.settingsHash is the only
+  /// settings fingerprint anywhere and it is deleted with the queue row once the
+  /// job dispatches.
+  settingsHash       String?      @map("settings_hash")
+  /// Which authorization permitted this run, captured from the project's current
+  /// record at start. Null for an internal engagement, which legitimately has
+  /// none. SetNull rather than Cascade so deleting an authorization cannot
+  /// erase the fact that a scan ran.
+  authorizationId    String?      @map("authorization_id")
+  authorization      EngagementAuthorization? @relation(fields: [authorizationId], references: [id], onDelete: SetNull)
   createdAt          DateTime     @default(now()) @map("created_at")
   updatedAt          DateTime     @updatedAt @map("updated_at")
 

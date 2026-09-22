@@ -50,6 +50,17 @@ For per-skill tunable defaults, use `project-settings-cascade`.
   for a tool `TOOL_PHASE_MAP` blocks in that phase.
 - **NEVER assume existing projects inherit the new skill.** `builtIn` is a strict
   has-key check; existing projects need a jsonb update to `attackSkillConfig`.
+- **ALWAYS add a registry entry for a per-skill tunable that became a `Project`
+  column** in
+  [recon_settings/registry.yaml](../../recon_settings/registry.yaml). A test
+  walking `Prisma.ProjectScalarFieldEnum` fails until every column has one.
+  Draft it with `python3 tooling/scripts/extract_recon_registry.py`, edit it,
+  then `python3 recon_settings/build.py`.
+  An attack-skill tunable is ordinary `mcp: settable` tuning now, bounded by its
+  registry entry and gated at scan start by `roeForbiddenCategories`,
+  `roeForbiddenTools` and `roeAllowDos` rather than by being unreachable. Give it
+  `traffic: active` so it joins the queued-job fingerprint, and `roe_capped:
+  true` if its unit is `rps`.
 - **Pick the snake_case id once and use that exact literal in all 9 layers.**
   `grep -rn "<skill_id>" webapp/src agentic` must show it everywhere before you
   rebuild (an existing id like `cve_exploit` spans ~38 files).

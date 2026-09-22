@@ -21,6 +21,11 @@ import { LABEL_TABS, ROUTE_TABS, labelsForTab } from '@/app/api/analytics/unseen
 
 const VIEW_TABS = join(__dirname, '../components/ViewTabs/ViewTabs.tsx')
 const SCHEMA_PY = join(__dirname, '../../../../../graph_db/schema.py')
+// Uniqueness keys moved OUT of schema.py: it now renders its CREATE
+// CONSTRAINT statements from this declaration, so the `FOR (x:Label)`
+// literals only survive for the index statements. Reading both keeps this
+// checking the real label set rather than the half that stayed behind.
+const SCHEMA_KEYS_PY = join(__dirname, '../../../../../graph_db/schema_keys.py')
 
 /** Every member of the `TableViewMode` union, read out of its declaration. */
 function tableViewModes(): string[] {
@@ -95,13 +100,18 @@ describe('the labels used for the whole-graph tabs', () => {
 
 describe('ALL_GRAPH_LABELS tracks the graph schema', () => {
   // Skipped in the webapp image, which copies only webapp/.
-  const available = existsSync(SCHEMA_PY)
+  const available = existsSync(SCHEMA_PY) && existsSync(SCHEMA_KEYS_PY)
 
   test.skipIf(!available)('matches the tenant-indexed labels, minus the KB corpus', () => {
     const src = readFileSync(SCHEMA_PY, 'utf8')
     const indexed = new Set(
       [...src.matchAll(/FOR \([a-zA-Z_]+:([A-Za-z][A-Za-z0-9_]*)\)/g)].map(m => m[1]),
     )
+    // ...plus every label with a uniqueness key, now declared as data.
+    const keysSrc = readFileSync(SCHEMA_KEYS_PY, 'utf8')
+    for (const m of keysSrc.matchAll(/"label":\s*"([A-Za-z][A-Za-z0-9_]*)"/g)) {
+      indexed.add(m[1])
+    }
     indexed.delete('KBChunk')
     // `Muted` is a marker ADDED to a finding that an operator suppressed, not a
     // node type. It must never appear here: these labels drive the whole-graph

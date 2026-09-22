@@ -247,9 +247,11 @@ class OsintMixin:
                                               s.discovered_at = datetime(), s.updated_at = datetime()
                                 MERGE (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
                                 SET i.updated_at = datetime()
-                                MERGE (s)-[r:RESOLVES_TO {record_type: 'A'}]->(i)
+                                MERGE (s)-[r:RESOLVES_TO]->(i)
                                 ON CREATE SET r.timestamp = datetime()
-                                SET r.last_seen_at = datetime()
+                                SET r.last_seen_at = datetime(),
+                                    r.record_type = coalesce(r.record_type,
+                                        CASE WHEN $ip CONTAINS ':' THEN 'AAAA' ELSE 'A' END)
                                 """,
                                 name=hostname, ip=ip, user_id=user_id, project_id=project_id
                             )
@@ -369,9 +371,10 @@ class OsintMixin:
                             MATCH (s:Subdomain {name: $subdomain, user_id: $user_id, project_id: $project_id})
                             MERGE (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
                             SET i.updated_at = datetime()
-                            MERGE (s)-[r:RESOLVES_TO {record_type: $type}]->(i)
+                            MERGE (s)-[r:RESOLVES_TO]->(i)
                             ON CREATE SET r.timestamp = datetime()
-                            SET r.last_seen_at = datetime()
+                            SET r.last_seen_at = datetime(),
+                                r.record_type = coalesce(r.record_type, $type)
                             """,
                             subdomain=fqdn, ip=rec_value, type=rec_type,
                             user_id=user_id, project_id=project_id
@@ -1016,9 +1019,11 @@ class OsintMixin:
                                             s.updated_at = datetime()
                                         MERGE (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
                                         SET i.updated_at = datetime()
-                                        MERGE (s)-[r:RESOLVES_TO {record_type: 'A'}]->(i)
+                                        MERGE (s)-[r:RESOLVES_TO]->(i)
                                         ON CREATE SET r.timestamp = datetime()
-                                        SET r.last_seen_at = datetime()
+                                        SET r.last_seen_at = datetime(),
+                                            r.record_type = coalesce(r.record_type,
+                                                CASE WHEN $ip CONTAINS ':' THEN 'AAAA' ELSE 'A' END)
                                         """,
                                         name=hostname, ip=ip, user_id=user_id, project_id=project_id,
                                     )
@@ -1199,9 +1204,11 @@ class OsintMixin:
                                     SET s.source = 'fofa', s.updated_at = datetime()
                                     MERGE (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
                                     SET i.updated_at = datetime()
-                                    MERGE (s)-[r:RESOLVES_TO {record_type: 'A'}]->(i)
+                                    MERGE (s)-[r:RESOLVES_TO]->(i)
                                     ON CREATE SET r.timestamp = datetime()
-                                    SET r.last_seen_at = datetime()
+                                    SET r.last_seen_at = datetime(),
+                                        r.record_type = coalesce(r.record_type,
+                                            CASE WHEN $ip CONTAINS ':' THEN 'AAAA' ELSE 'A' END)
                                     """,
                                     name=host, ip=ip, user_id=user_id, project_id=project_id,
                                 )
@@ -1308,6 +1315,9 @@ class OsintMixin:
                             if domain and (hostname == domain or hostname.endswith("." + domain)):
                                 # In-scope → Subdomain node
                                 try:
+                                    # The edge usually exists already from DNS
+                                    # resolution, so the passive-DNS dates widen
+                                    # its window rather than being set on create.
                                     session.run(
                                         """
                                         MERGE (s:Subdomain {name: $name, user_id: $user_id, project_id: $project_id})
@@ -1316,9 +1326,19 @@ class OsintMixin:
                                         WITH s
                                         MERGE (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
                                         SET i.updated_at = datetime()
-                                        MERGE (s)-[r:RESOLVES_TO {record_type: $record_type}]->(i)
-                                        ON CREATE SET r.first_seen = $first_seen, r.last_seen = $last_seen, r.timestamp = datetime()
-                                        SET r.last_seen = CASE WHEN $last_seen <> '' THEN $last_seen ELSE r.last_seen END
+                                        MERGE (s)-[r:RESOLVES_TO]->(i)
+                                        ON CREATE SET r.timestamp = datetime()
+                                        SET r.record_type = coalesce(r.record_type, $record_type),
+                                            r.first_seen = CASE
+                                                WHEN $first_seen = '' THEN r.first_seen
+                                                WHEN coalesce(r.first_seen, '') = '' OR $first_seen < r.first_seen
+                                                    THEN $first_seen
+                                                ELSE r.first_seen END,
+                                            r.last_seen = CASE
+                                                WHEN $last_seen = '' THEN r.last_seen
+                                                WHEN coalesce(r.last_seen, '') = '' OR $last_seen > r.last_seen
+                                                    THEN $last_seen
+                                                ELSE r.last_seen END
                                         """,
                                         name=hostname, ip=ip, user_id=user_id, project_id=project_id,
                                         record_type=record_type, first_seen=first_seen, last_seen=last_seen,
@@ -1994,9 +2014,11 @@ class OsintMixin:
                                         MERGE (i:IP {address: $ip, user_id: $user_id,
                                                      project_id: $project_id})
                                         SET i.updated_at = datetime()
-                                        MERGE (s)-[r:RESOLVES_TO {record_type: 'A'}]->(i)
+                                        MERGE (s)-[r:RESOLVES_TO]->(i)
                                         ON CREATE SET r.timestamp = datetime()
-                                        SET r.last_seen_at = datetime()
+                                        SET r.last_seen_at = datetime(),
+                                            r.record_type = coalesce(r.record_type,
+                                                CASE WHEN $ip CONTAINS ':' THEN 'AAAA' ELSE 'A' END)
                                         """,
                                         name=hostname_val, ip=ip,
                                         user_id=user_id, project_id=project_id,

@@ -6,7 +6,7 @@
 
 RedAmon is an AI-driven penetration testing platform built on **Scatter-Gather ReAct (SG-ReAct)**, a hybrid architecture that combines the iterative ReAct reasoning loop with bounded parallel multi-agent decomposition. A root agent runs the engagement; when an objective decomposes into independent investigation angles, it deploys a *fireteam* of specialist sub-agents that work concurrently inside the same event loop and merge their findings back. The pattern delivers wall-clock parallelism without coordination chaos, predictable termination, auditable safety, and real-time operator control at every node of the graph.
 
-What makes RedAmon distinctive is not that it runs an LLM in a loop, every agentic pentester does that, but the *cognitive scaffolding* that surrounds the loop. A **Deep Think strategic pre-step** runs at moments of architectural significance (first iteration, phase transition, a tiered productivity-score threshold crossing, or the agent's own request for help), producing a structured situation / competing-hypotheses / vectors / approach / priority / risks analysis that anchors the next decisions; the schema *forces* the strategist to enumerate ≥2 candidate explanations with a concrete disambiguating probe for each, which is the anti-confirmation-bias mechanism that turns "a list of guesses" into "a science experiment". Deep Think carries a **cooldown** (suppresses re-fires until the agent has executed the previous plan, with critical-tier and state-growth-stall overrides) and a **Jaccard novelty check** (rejects a new plan that paraphrases a failing one, forcing the agent to articulate what specific parameter is changing or pivot to a strategy class not present in the previous plan).
+What defines RedAmon is the *cognitive scaffolding* that surrounds the LLM loop. A **Deep Think strategic pre-step** runs at moments of architectural significance (first iteration, phase transition, a tiered productivity-score threshold crossing, or the agent's own request for help), producing a structured situation / competing-hypotheses / vectors / approach / priority / risks analysis that anchors the next decisions; the schema *forces* the strategist to enumerate ≥2 candidate explanations with a concrete disambiguating probe for each, which is the anti-confirmation-bias mechanism that turns "a list of guesses" into "a science experiment". Deep Think carries a **cooldown** (suppresses re-fires until the agent has executed the previous plan, with critical-tier and state-growth-stall overrides) and a **Jaccard novelty check** (rejects a new plan that paraphrases a failing one, forcing the agent to articulate what specific parameter is changing or pivot to a strategy class not present in the previous plan).
 
 Looping is detected by a **continuous productivity score** that aggregates five observed signals into a single dimensionless number mapped to five tiers (green → yellow → orange → red → critical) with escalating prompt-level actions. The cleverest input is an **axis lock-in detector**: a per-tool-family extractor that reduces every expensive call to the semantic dimensions the agent is *holding constant* - `(target=/login, fixed_user=admin)` for a credential brute force, `(target=/FUZZ, fixed_filter=200,301)` for a directory fuzz - and records it in a session-long ledger. Three successive brute-force attempts against the same username collapse onto the same axis key even when the wordlists are different, so slow loops spread across many iterations still register as repetition. By the third unproductive attempt on the same axis the score crosses red and the orchestrator names the locked dial explicitly, demanding the agent change a different parameter rather than scale up the same losing attempt. Combined with an **orchestrator-owned state-growth signal** (resets to 0 when the engagement state actually grows, increments otherwise, completely independent of LLM self-report), the productivity layer cannot be fooled by an over-optimistic agent.
 
@@ -18,7 +18,7 @@ The engagement itself runs on a **14-node LangGraph state machine** with durable
 
 The **RedAmon Agentic System** is an AI-driven penetration testing platform that combines an autonomous reasoning agent with a deterministic recon pipeline, a structured attack-chain memory, and a controlled fan-out of specialist sub-agents. It is engineered around a single architectural pattern that we call **Scatter-Gather ReAct (SG-ReAct)**, a hybrid of the classical ReAct (Reasoning + Acting) loop with bounded parallel multi-agent decomposition. SG-ReAct is what allows RedAmon to scale to multi-hour engagements without losing predictability, safety, or the operator's ability to intervene at any moment.
 
-This document is the technical reference for that system. It describes every node, every state transition, every guardrail layer, every prompt-injection mechanism, and every persistence boundary. It is written for two audiences at once: engineers who need to extend or audit the codebase, and security leaders who need to understand *why* the architectural choices that follow are not interchangeable with those of the other AI pentesting tools on the market.
+This document is the technical reference for that system. It describes every node, every state transition, every guardrail layer, every prompt-injection mechanism, and every persistence boundary. It is written for two audiences at once: engineers who need to extend or audit the codebase, and security leaders who need to understand *why* the architectural choices that follow were made.
 
 ### What RedAmon Is
 
@@ -52,49 +52,6 @@ Concretely, SG-ReAct delivers four properties that matter on a real engagement:
 2. **Predictable termination.** Every wave has a hard timeout, every member has an iteration budget, and the parent only resumes when the gather completes (or is cancelled). The operator can always answer the question "will this run forever?" with no.
 3. **Auditable safety.** All four guardrail layers (hard rail, soft rail, phase gate, RoE) are evaluated at the parent and inherited by every member. There is no path through the architecture where a sub-agent can act outside the scope the root was authorised for. A single per-engagement audit covers every member of every wave.
 4. **Operator control at every level.** The operator sees the whole wave as one card with N specialist panels, can approve or reject each member's dangerous-tool requests independently, can stop the entire wave with a single click, and can resume a checkpointed engagement after any kind of interruption, including a backend restart.
-
-### Where RedAmon Stands Against the Market
-
-RedAmon was benchmarked against four other AI pentesting agents (PentAGI, PentestGPT, Strix, Shannon) across **82 agentic feature primitives** organised into 14 dimensions: orchestration topology, control flow, task decomposition, memory and context, tool selection, self-correction, guardrails, human-in-the-loop, isolation and multi-tenancy, domain knowledge integration, observability, persistence, provider flexibility, and finding-quality primitives. The full feature matrix, methodology, and per-system leadership map live later in this document, see [Comparative Benchmark - RedAmon vs. Other AI Pentesters](#comparative-benchmark--redamon-vs-other-ai-pentesters).
-
-| System | Coverage | Paradigm |
-|---|---:|---|
-| **RedAmon** | **72.0 %** | **Phase-gated SG-ReAct + bounded fireteam** |
-| Strix | 41.5 % | Dynamic multi-agent graph + skill library |
-| PentAGI | 40.2 % | Hierarchical multi-agent (15 `MsgchainType` roles) |
-| Shannon | 39.0 % | Temporal-orchestrated 5-phase pipeline |
-| PentestGPT | 23.8 % | Single-agent thin wrapper with 5-state FSM |
-
-RedAmon's lead is **30 percentage points over the nearest competitor**, and concentrated in the categories that decide whether an AI pentester is *enterprise-ready* rather than just *interesting*:
-
-- **Guardrails (8.0 / 8.0 vs. nearest 2.0).** RedAmon is the only platform that combines a deterministic non-disableable domain blocklist, an LLM-based scope check, phase-gated tool whitelisting, a Rules-of-Engagement contract framework, dangerous-tool confirmation, phase-transition approval, and a recursive-deployment ban. Every other system stops at one or two layers.
-- **Domain knowledge integration (5.0 / 5.0 vs. nearest 2.0).** Only RedAmon offers a queryable knowledge base, CVE/CWE database lookup, MITRE mapping (CWE/CAPEC/ATT&CK), and a curated skill library accessible from inside the agent. Every other system relies on the LLM's pre-trained knowledge alone.
-- **Memory and context (6.0 / 8.0, +50 % over nearest).** Only RedAmon couples a persistent Neo4j knowledge graph with vector RAG over curated infosec sources and cross-encoder reranking. Competitors rely on conversation buffers and at best a single retrieval mechanism.
-- **Tool selection and use (6.0 / 8.0, +33 % over nearest at 4.5).** Only RedAmon ships MCP server integration, parallel tool waves, tool-mutex groups (singleton protection for tools like Metasploit), and a dangerous-tool confirmation gate. Shannon comes second largely on the strength of its strict Zod + JSON-Schema validation pipeline.
-- **Multi-tenancy (4.0 / 4.0 vs. nearest 3.0).** Tenant-scoped context propagation, tenant-filtered Neo4j queries (the agent cannot write a Cypher query that reads another project's data), session isolation, and sandbox isolation. RedAmon is the only platform designed from the start for multiple operators on multiple projects.
-
-The competitive picture is not "RedAmon wins everything." Strix leads on dynamic agent topology and context compression; Shannon leads on durable workflow guarantees (Temporal) and PoC-mandatory exploitation rigor; PentAGI leads on LLM provider breadth and Langfuse observability; PentestGPT is the cleanest single-agent thin-wrapper implementation. The benchmark documents these advantages honestly. But on the dimensions that decide whether a tool can be **trusted with paying customer engagements**, safety, scope control, audit, multi-tenant isolation, persistent project intelligence, RedAmon is alone in its tier.
-
-### Why SG-ReAct Beats the Alternatives in Practice
-
-Each competing paradigm has a specific failure mode under real-engagement pressure:
-
-| Competing pattern | Failure mode under load | How SG-ReAct avoids it |
-|---|---|---|
-| **Single-agent ReAct** (PentestGPT) | Sequential investigation of independent angles wastes wall clock and accumulates noise in the prompt | Fireteam fan-out runs N angles in parallel; merge keeps the parent's prompt clean |
-| **Hierarchical multi-agent** (PentAGI) | Inter-agent calls go through prompt-formatted "tool" interfaces, slow, expensive, lossy | Fireteam members share the parent's Neo4j session, MCP connections, event loop. Zero cross-process serialisation |
-| **Dynamic multi-agent** (Strix) | Emergent topology means unpredictable termination, hard-to-audit safety story, no bound on resource use | Bounded fan-out with per-wave timeouts and recursion ban. Worst case is provable |
-| **Workflow-orchestrated pipeline** (Shannon) | Rigid DAG cannot adapt to what the agent learns mid-engagement | LangGraph state machine plus ReAct loop adapts every iteration; fireteam composes on top, doesn't replace |
-
-The architectural insight is that **autonomy and safety are not opposites**, they are independent axes. Most agentic frameworks treat extra autonomy as inherently risky and respond by limiting what the agent can do. SG-ReAct treats them as orthogonal: the agent is given a wide action vocabulary (use_tool, plan_tools, deploy_fireteam, transition_phase, ask_user, complete) and the safety story is built into the *transitions between actions* rather than into the actions themselves. Phase gating, RoE enforcement, dangerous-tool confirmation, scope rails, and the recursion ban all sit on the edges of the graph; the agent reasons freely *inside* the nodes.
-
-This is what lets RedAmon do things that competing platforms cannot:
-
-- **Run a 4-hour customer engagement unattended overnight**, resume it cleanly the next morning if the backend was patched, and produce a defensible audit trail of every action taken, what was scanned, why, what the agent learned, what it decided next, what was approved, what was rejected.
-- **Scale to multi-target engagements** by deploying fireteam waves that investigate independent surfaces in parallel, while the operator only sees one consolidated chat surface and one set of approvals.
-- **Encode a full pentest contract** (client metadata, time windows, technique gating, compliance frameworks, sensitive-data handling) once, in the project settings, and have every subsequent agent action automatically respect it, at the prompt level *and* at the code level.
-- **Build cumulative project intelligence over time** by writing every tool execution, every finding, every decision, and every dead-end into the persistent attack-chain graph, so the next engagement on the same project starts already knowing what was tried before, what worked, and what to skip.
-- **Generate professional-grade reports** by joining the persistent recon graph (what exists) with the persistent attack chain (what the agent did about it) into six narrative sections that customer-facing operators can ship as the deliverable.
 
 ### How To Read This Document
 
@@ -142,10 +99,9 @@ Engineers wanting to extend the platform should focus on the LangGraph chapter, 
 25. [Knowledge Base Integration](#knowledge-base-integration)
 26. [Report Summarizer (Narrative Synthesis)](#report-summarizer-narrative-synthesis)
 27. [Companion Orchestrators (Cypherfix)](#companion-orchestrators-cypherfix)
-28. [Comparative Benchmark - RedAmon vs. Other AI Pentesters](#comparative-benchmark--redamon-vs-other-ai-pentesters)
-29. [Error Handling & Resilience](#error-handling--resilience)
-30. [Codebase Layout](#codebase-layout)
-31. [Configuration Reference](#configuration-reference)
+28. [Error Handling & Resilience](#error-handling--resilience)
+29. [Codebase Layout](#codebase-layout)
+30. [Configuration Reference](#configuration-reference)
 
 ---
 
@@ -1332,7 +1288,7 @@ sequenceDiagram
 
 When the LLM emits `action: "plan_tools"`, multiple tools run concurrently inside a single agent iteration and the WebSocket stream carries a different event sequence than for sequential tool calls: a `plan_start` opens the wave, each parallel tool emits its own interleaved `tool_start` / `tool_output_chunk` / `tool_complete` events tagged with the same `wave_id`, then `plan_complete` closes the wave, and finally `plan_analysis` carries the combined LLM analysis once the next think iteration runs. The frontend renders the wave as a single grouped `PlanWaveCard` rather than as N independent tool cards.
 
-The full mechanics of waves, when the agent chooses them, how `asyncio.gather` runs the steps, the LLM decision schema, mutex protection for singletons, and how Wave Execution compares to other AI pentesters, live in the dedicated [Wave Execution chapter](#wave-execution-parallel-tool-plans).
+The full mechanics of waves, when the agent chooses them, how `asyncio.gather` runs the steps, the LLM decision schema, and mutex protection for singletons, live in the dedicated [Wave Execution chapter](#wave-execution-parallel-tool-plans).
 
 ---
 
@@ -2758,20 +2714,6 @@ TOOL_MUTEX_GROUPS = {
 ```
 
 For `execute_plan` waves, the orchestrator serialises mutex-grouped steps inside the otherwise-parallel `asyncio.gather`. For Fireteam, the deploy-time validator rejects any plan where two members claim tools in the same group. Future singletons (Playwright `navigate`, `/tmp/`-writing tools) are tracked as deferred items.
-
-### How It Compares to Other AI Pentesters
-
-Wave Execution is **not unique to RedAmon**, but the implementation depth varies sharply across the market. The 2026-04-19 audit produced this matrix (full discussion in the [Comparative Benchmark](#comparative-benchmark--redamon-vs-other-ai-pentesters), Section 5 "Tool Selection & Use"):
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Parallel tool waves | ✅ | ✅ | ❌ | ⚠️ | ✅ |
-| Tool-mutex groups (singleton protection) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Dangerous-tool confirmation gate (per wave) | ✅ | ❌ | ❌ | ❌ | ❌ |
-
-**RedAmon** runs `asyncio.gather` over a Pydantic-validated `ToolPlan` and serialises any mutex-grouped steps automatically. **PentAGI** runs parallel tool calls via Go goroutines but lacks both mutex protection and a confirmation gate. **Shannon** runs phase-internal agents in parallel via Temporal but the parallelism is at the *agent-phase* level rather than at the *tool* level inside a single agent step. **Strix** has tool execution in async tasks but the audit found no evidence that multiple tools run concurrently inside a single agent step (confirmed by direct grep, `asyncio.create_task` is used for individual tool isolation, not wave parallelism). **PentestGPT** is sequential by design.
-
-The combination of *parallel waves* + *mutex protection* + *per-wave confirmation gate* exists in only one system. The mutex protection in particular is what makes wave execution safe to combine with Fireteam fan-out: if the root agent deploys three fireteam members and each member's first tool wave wants Metasploit, RedAmon will serialise them automatically; every other system in the benchmark would race on the singleton.
 
 ### Settings
 
@@ -4408,360 +4350,6 @@ Both companion orchestrators reuse [agentic/key_rotation.py](../../agentic/orche
 - **Different success criteria**: pentest = "find weaknesses", triage = "rank weaknesses", codefix = "patch source". Bundling would force one prompt to do all three.
 - **Different state shapes**: pentest carries `target_info` and EvoGraph memory; codefix carries a repo file tree and edit log; triage carries finding clusters. Keeping them separate keeps each `TypedDict` small.
 - **Different lifecycles**: pentest runs in real-time during an engagement; triage runs after; codefix runs much later (often by a different operator).
-
----
-
-## Comparative Benchmark, RedAmon vs. Other AI Pentesters
-
-This chapter is an **impartial, code-verified feature comparison** of RedAmon against the four other open-source AI pentesting agents that meaningfully overlap its scope: **PentAGI**, **PentestGPT**, **Strix**, and **Shannon**. The comparison is structured as a series of capability matrices across 14 architectural dimensions, plus an aggregate scoreboard, plus a per-system "where this leads" summary that is deliberately written without RedAmon-favorable framing. This is a feature inventory, not a marketing piece, RedAmon does not win every dimension and the matrices show exactly where competitors lead.
-
-Every cell in the matrices below was audit-verified against the current `main` branch of each system on **2026-04-19**. The audit rule is strict: a feature is marked present only if it is in code on the main branch, no roadmap items, no documentation claims unsupported by source.
-
-### Methodology
-
-Three rules govern this comparison:
-
-1. **Code over documentation.** A feature is marked "present" only if it is in code on the `main` branch, no roadmap items, no planned features, no claimed-but-unimplemented capabilities. Where a system's README claims a feature that the audit did not find in source, the audit decision wins.
-2. **Conservative scoring.** Three states are used: **✅ full** (the feature is implemented and in active use), **⚠️ partial** (present but limited, single-layer, or accessible only with significant configuration work), **❌ absent**. Aggregate scoring assigns ✅ = 1.0, ⚠️ = 0.5, ❌ = 0.
-3. **Coverage is not quality.** Two systems with the same ✅ on the same row can implement the feature at very different depths. The matrices are an inventory of *which agentic primitives exist where*, not a quality verdict. Quality and operational outcomes are measured by the empirical harness in the internal benchmark.
-
-### Systems Under Comparison
-
-| System | Language / Stack | Paradigm | License | Audited at |
-|---|---|---|---|---|
-| **RedAmon** | Python · LangGraph · Postgres · Neo4j | Phase-gated SG-ReAct + bounded fireteam | Proprietary | `master` |
-| **PentAGI** | Go · Postgres · pgvector · optional Neo4j | Hierarchical multi-agent (15 `MsgchainType` prompt-driven roles) | Open source | `main` |
-| **PentestGPT** | Python · Claude Agent SDK · TUI | Single-agent thin wrapper with 5-state FSM | Open source | `main` (v1.0) |
-| **Strix** | Python · litellm · Docker | Dynamic multi-agent graph + skill library | Open source | `main` |
-| **Shannon** | TypeScript · Temporal · Claude Agent SDK | Temporal-orchestrated 5-phase pipeline | AGPL-3.0 | `main` (Lite) |
-
-Symbols used in every matrix below: **✅** full · **⚠️** partial · **❌** absent.
-
-### 1. Orchestration & Topology
-
-How the agent or agents are arranged, how they spawn, and how they execute concurrently.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Single-agent control loop | ✅ | ⚠️ | ✅ | ✅ | ✅ |
-| Multi-agent hierarchy | ⚠️ | ✅ | ❌ | ✅ | ✅ |
-| Dynamic agent spawning at runtime | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Bounded parallel fan-out (fireteam / fixed wave) | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Thread-based parallelism | ❌ | ❌ | ❌ | ✅ | ❌ |
-| `asyncio.gather`-based parallelism | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Goroutine-based parallelism | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Durable workflow orchestrator (Temporal etc.) | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Feature-flagged parallelism toggle | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Subtotal (max 9.0)** | **5.5** | **2.5** | **1.0** | **4.0** | **4.0** |
-
-**What each row in this matrix means.** *Single-agent control loop* asks whether the system has even one classical "think → act → observe" loop, the absolute minimum requirement to call something an agent at all. *Multi-agent hierarchy* asks whether multiple distinct agent roles coexist and can call each other. *Dynamic agent spawning at runtime* is the strongest "emergent topology" marker: a system passes only if a running agent can decide to instantiate a new agent during execution, not just at startup. *Bounded parallel fan-out* is the disciplined alternative, a fixed-shape wave that runs N pre-declared specialists in parallel and merges their results back. The next four rows pin down the *concurrency mechanism* itself: *thread-based* (OS threads), *asyncio.gather-based* (cooperative coroutines on a single event loop), *goroutine-based* (Go's lightweight green threads), and *durable workflow orchestrator* (Temporal-style activities that survive crashes through replay). *Feature-flagged parallelism toggle* identifies systems where parallelism can be switched off per project, collapsing the agent back to a single sequential loop for cost-sensitive engagements.
-
-**What the comparison reveals.** The five systems have made five genuinely different bets on topology. **Strix** bets on emergence, its `agents_graph_actions` literally adds new agent nodes to the graph during execution, letting the agent design its own coordination at runtime. **Shannon** bets on durability, its Temporal-orchestrated pipeline runs each phase as an activity that can replay deterministically after any backend crash. **PentAGI** bets on language-level concurrency, Go goroutines spawned by the flow controller (`pkg/controller/flow.go:55`) carry agent invocations across its 15 `MsgchainType` roles. **RedAmon** bets on bounded predictability, a small, fixed set of parallel patterns (single tool, plan_tools wave, fireteam fan-out) all sit inside a strict LangGraph state machine where every transition is auditable. **PentestGPT** does not bet on concurrency at all; it is a single sequential agent, and it accepts that constraint deliberately to keep its TUI experience clean and its state machine small (5 explicit states). There is no single winner row-by-row, RedAmon and Shannon tie on bounded fan-out, only Strix has dynamic spawning, only Shannon has Temporal durability, only RedAmon has the parallelism toggle. The aggregate (RedAmon 5.5, Shannon 4.0, Strix 4.0, PentAGI 2.5, PentestGPT 1.0) reflects breadth of mechanisms, not a "best topology" verdict.
-
-**Operational implications for the operator.** If the engagement is short (under one hour) and interactive, parallelism barely matters, PentestGPT's simplicity wins by getting out of the operator's way. If the engagement is a multi-objective long-horizon scan where backend failures are expected (cloud preemption, container restart, deploy mid-run), Shannon's Temporal durability is decisive: nothing else can replay an in-flight workflow at activity granularity. If the engagement requires investigating many independent attack angles concurrently *and* every action must be defensible in an audit trail, RedAmon's bounded fireteam is the right shape, N specialists running in parallel, each writing attributed `ChainStep` rows to the persistent attack chain, all under the same guardrail stack. Strix's emergent topology is best suited to research scenarios where the operator wants to study what coordination patterns an agent invents when given freedom. PentAGI's goroutines are an internal implementation detail more than a user-facing differentiator, the operator sees a unified flow, not 15 individual agents.
-
-### 2. Control Flow & State Management
-
-How the agent's execution is structured, paused, and resumed.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Graph-based state machine (LangGraph) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Custom async / event-driven loop | ❌ | ✅ | ⚠️ | ✅ | ⚠️ |
-| Explicit FSM states | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| Pub/sub event bus | ⚠️ | ⚠️ | ✅ | ⚠️ | ❌ |
-| Phase-gated execution | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Pause / resume / instruction injection | ✅ | ⚠️ | ✅ | ⚠️ | ❌ |
-| **Subtotal (max 6.0)** | **4.0** | **2.5** | **3.5** | **2.5** | **2.0** |
-
-**What each row in this matrix means.** *Graph-based state machine (LangGraph)* asks whether the agent's flow is described as a formal graph of named nodes connected by labelled edges, the strongest possible structure, because every possible transition is enumerable and auditable. *Custom async / event-driven loop* asks whether the system instead uses an imperative loop where flow is determined by code paths and message routing rather than a declarative graph. *Explicit FSM states* asks whether the agent's lifecycle is defined as a finite set of named states (e.g. IDLE / RUNNING / PAUSED), weaker than a graph but stronger than implicit state. *Pub/sub event bus* asks whether components communicate through published events rather than direct method calls, important for decoupling the UI from the agent core. *Phase-gated execution* asks whether the agent's available actions change depending on which engagement phase it is currently in (informational / exploitation / post-exploitation). *Pause / resume / instruction injection* asks whether the operator can interrupt the running agent at any point, optionally inject new context, and resume cleanly.
-
-**What the comparison reveals.** Only **RedAmon** uses a formal graph-based state machine, its 14-node LangGraph is the strongest control-flow structure in the benchmark. The other four systems all use some form of imperative async loop, but with very different degrees of state discipline. **PentestGPT** is the surprise winner of this category in the operator-experience sense: its tiny but extremely well-designed explicit FSM (`AgentState` enum: IDLE → RUNNING → PAUSED → COMPLETED → ERROR) plus its event-bus (`EventBus` decoupling TUI from agent) is what makes Ctrl+P pause and Ctrl+R resume feel instantaneous. **Shannon's** Temporal workflow gives it phase gating (the 5-phase pipeline is enforced sequentially) but no interactive pause, Temporal workers are ephemeral, so there is no live process to interrupt. **PentAGI's** flow status enum (`created, running, waiting, finished, failed`) explicitly rejects "paused" as invalid; "waiting" exists but only for user-input gates baked into the prompt, not for arbitrary operator interruption. **Strix's** loop is async but state lives implicitly inside the agent graph and the iteration counter, pause is partial at best. The category subtotals (RedAmon 4.0, PentestGPT 3.5, PentAGI 2.5, Strix 2.5, Shannon 2.0) reflect a real spread.
-
-**Operational implications for the operator.** Control-flow structure is the difference between *understandable* agents and *opaque* ones. With RedAmon, an operator with the LangGraph diagram in hand can read the source and predict every transition, there are no hidden side paths. With PentestGPT, the FSM gives the operator a clear mental model of what state the agent is in at any moment ("oh, it's PAUSED, I can resume"). With Shannon, the operator sees the workflow as a Temporal execution and can query its progress externally, but cannot interrupt it without abandoning the run. With PentAGI and Strix, the operator must trust that the imperative loop will reach a defined state, debugging unexpected behaviour requires reading code paths rather than a diagram. For long autonomous engagements where the operator may need to step away and come back, the combination of *graph-based* + *pause/resume* + *phase gating* (RedAmon's profile) is materially safer than any other configuration.
-
-### 3. Task Decomposition
-
-How an objective becomes structured subtasks the agent can act on.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Explicit todo list with priority | ✅ | ⚠️ | ❌ | ❌ | ❌ |
-| Attack-path classification (LLM-driven) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Skill-driven decomposition | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Fixed pipeline DAG | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Implicit (prompt-only) decomposition | ❌ | ✅ | ✅ | ⚠️ | ⚠️ |
-| **Subtotal (max 5.0)** | **2.0** | **1.5** | **1.0** | **1.5** | **1.5** |
-
-**What each row in this matrix means.** Task decomposition is *how a high-level objective ("test this web app") becomes the specific subtasks the agent will execute*. *Explicit todo list with priority* asks whether the agent maintains a structured task list (data structure, not just prose) with priority labels that drive ordering. *Attack-path classification (LLM-driven)* asks whether the system runs a dedicated classifier at session start to pick which attack workflow applies (CVE exploit vs. credential brute force vs. SQL injection vs. XSS, etc.). *Skill-driven decomposition* asks whether the agent picks a curated playbook from a skill library and executes its steps. *Fixed pipeline DAG* asks whether the system has a hard-coded ordering of phases that always run in the same sequence regardless of objective. *Implicit (prompt-only) decomposition* asks whether the agent simply receives the objective in its system prompt and is expected to figure out subtasks on its own with no structural support.
-
-**What the comparison reveals.** Decomposition strategies diverge sharply across the five systems. **RedAmon** is the only one combining two structured mechanisms: an LLM-driven attack-path classifier (`prompts/classification.py`) that picks one of 6 attack workflows at session start, plus an explicit prioritised TODO list (`TodoItem` Pydantic model with status + priority) that the agent reads and updates every iteration. **Shannon** uses the most rigid approach, a hard-coded 5-phase pipeline (Pre-Recon → Recon → Vulnerability Analysis → Exploitation → Reporting) defined in its Temporal workflow. The pipeline is the same for every target; the agent's job is to fill in each phase, not choose between phases. **Strix** uses skill-driven decomposition, its skill library (`strix/skills/` with markdown playbooks for SSRF, path traversal, etc.) is selected by the agent itself based on what it observes, giving runtime flexibility but no top-down structure. **PentAGI** and **PentestGPT** rely entirely on the LLM to decompose implicitly inside the prompt, there is no decomposition data structure in code. The aggregate (RedAmon 2.0, Shannon 1.5, Strix 1.5, PentAGI 1.5, PentestGPT 1.0) is the lowest-variance dimension in the benchmark, but the differences in *kind* of decomposition matter more than the score.
-
-**Operational implications for the operator.** The decomposition strategy directly shapes *how the operator can intervene*. With RedAmon's TODO list, the operator can see exactly which subtasks are pending, in-progress, completed, or blocked, and the next session resumes those TODOs. With Shannon's fixed pipeline, the operator gets predictable phase transitions but cannot easily redirect the agent toward an unexpected attack vector that emerges mid-engagement. With Strix's skill library, the operator can extend the agent's capability by adding a new markdown skill file, but cannot inspect the active decomposition without reading prompts. With PentAGI and PentestGPT, decomposition is invisible, it lives entirely inside the LLM's reasoning, which is fine for short focused tasks but problematic for multi-day engagements where the agent's plan needs to be reviewed and adjusted. For repeatable customer engagements where multiple operators may pick up a session, RedAmon's combination of *attack-path classification* + *explicit TODO list* + *phase-gated workflows* is the most operator-portable.
-
-### 4. Memory & Context
-
-What the agent remembers and how it retrieves prior knowledge.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Short-term execution trace | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Semantic context compression | ❌ | ✅ | ❌ | ✅ | ❌ |
-| Windowed truncation | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Persistent knowledge graph (Neo4j / Graphiti) | ✅ | ⚠️ | ❌ | ❌ | ❌ |
-| Vector RAG on curated sources | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Cross-encoder reranking | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Shared wiki / notes across agents | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Per-agent message queues | ❌ | ⚠️ | ❌ | ✅ | ⚠️ |
-| **Subtotal (max 8.0)** | **6.0** | **4.0** | **1.0** | **4.0** | **1.5** |
-
-**What each row in this matrix means.** Memory architecture determines *what the agent can remember* and *for how long*. *Short-term execution trace* is the universal baseline, the agent has access to recent messages and tool outputs within the current session. *Semantic context compression* asks whether the system actively summarises older context to fit more into the prompt window (LLM-driven, not just truncation). *Windowed truncation* asks whether the system keeps a fixed-size window of recent steps and drops the rest. *Persistent knowledge graph (Neo4j / Graphiti)* asks whether the system writes structured discoveries to a graph database that survives across sessions. *Vector RAG on curated sources* asks whether the agent can retrieve passages from a curated corpus (CVE databases, exploit references, MITRE pages) by semantic similarity. *Cross-encoder reranking* asks whether retrieved passages are re-scored by a more expensive model before being returned to the agent, a quality-vs-cost tradeoff that materially improves precision. *Shared wiki / notes across agents* asks whether multiple agents can read and write a common note store. *Per-agent message queues* asks whether agents communicate through queues rather than shared state.
-
-**What the comparison reveals.** The five systems have made fundamentally different memory bets. **RedAmon** invests in *persistent structured intelligence*, a Neo4j knowledge graph (39+ node types covering attack-chain steps, findings, decisions, failures), plus vector RAG over 7 curated infosec sources, plus cross-encoder reranking (CONFIDENCE ≥ 0.80 threshold). The agent literally reasons over its own discoveries via the `query_graph` tool. **Strix** invests in *inter-agent coordination state*, a shared wiki + per-agent message queues + LLM-driven semantic context compression (`MemoryCompressor`). This fits its dynamic mesh: when agents are spawned at runtime, they need a way to share what they've learned. **PentAGI** has the broadest mechanism count (5 of 8) but with weaker depth, its pgvector store is built-in but its Graphiti/Neo4j integration is *optional* (only deployed if the operator brings up `docker-compose-graphiti.yml`). **Shannon** has the simplest model, short-term trace within each phase, with structured deliverables passed forward to the next phase, but no persistent cross-session memory. **PentestGPT** is the minimalist, short-term trace only, no persistent memory of any kind beyond the file-based session save. The aggregate (RedAmon 6.0, Strix 4.0, PentAGI 4.0, Shannon 1.5, PentestGPT 1.0) shows RedAmon's lead is real but the *kind* of memory matters more than the count.
-
-**Operational implications for the operator.** Memory determines *whether the second engagement on the same target benefits from the first*. With RedAmon, the second session opens with full prior intelligence already loaded, the agent knows what was scanned, what worked, what failed, and what infrastructure was discovered. With Strix's wiki and dynamic agents, in-session coordination is excellent but cross-session continuity depends on operator-curated notes. With PentAGI's optional Graphiti, the operator must opt in to persistence at deployment time and accept the operational complexity (an extra Neo4j container) that comes with it. With Shannon, every session starts from scratch, the only continuity is what the operator manually carries over. With PentestGPT, memory effectively ends when the session ends. For an organisation running repeated engagements on the same customer infrastructure, RedAmon's persistent knowledge graph + vector RAG is the only configuration where the agent actually *gets smarter about that customer over time*; the others are stateless tools that happen to support sessions.
-
-### 5. Tool Selection & Use
-
-How the agent calls external tools and how those calls are validated.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| MCP server integration | ✅ | ❌ | ❌ | ❌ | ❌ |
-| XML-based tool calling | ❌ | ❌ | ❌ | ✅ | ❌ |
-| JSON-native tool calling | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Structured output validation (Pydantic / Zod) | ✅ | ⚠️ | ❌ | ⚠️ | ✅ |
-| Strict runtime schema (Zod + JSON Schema draft-07) | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Parallel tool waves | ✅ | ✅ | ❌ | ⚠️ | ✅ |
-| Tool-mutex groups (singleton protection) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Dangerous-tool confirmation gate | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Subtotal (max 8.0)** | **6.0** | **2.5** | **1.0** | **2.0** | **4.5** |
-
-**What each row in this matrix means.** Tool selection is *how the agent invokes external commands and how those calls are validated*. *MCP server integration* asks whether the system uses the Model Context Protocol, a JSON-RPC standard that lets tools live in separate containers and be swapped without touching agent code. *XML-based tool calling* and *JSON-native tool calling* identify the wire format the LLM uses to express tool invocations; these are mutually exclusive within a single system. *Structured output validation (Pydantic / Zod)* asks whether the LLM's tool-call output is validated against a schema before execution. *Strict runtime schema (Zod + JSON Schema draft-07)* is the strongest validation tier, combining a TypeScript schema library with the IETF JSON Schema standard. *Parallel tool waves* asks whether the system can execute multiple independent tools concurrently in a single agent step. *Tool-mutex groups (singleton protection)* asks whether the system has explicit protection against two concurrent agents racing on a tool that has shared state inside the sandbox (e.g. the Metasploit console). *Dangerous-tool confirmation gate* asks whether the system pauses for human approval before executing tools that can cause real damage.
-
-**What the comparison reveals.** RedAmon is the only system that **integrates MCP servers**, allowing the four tool servers (network_recon, nuclei, metasploit, nmap) to live in independent Docker containers that can be added, replaced, or scaled without touching the agent code. Shannon has the **strictest schema validation pipeline**: `queue-validation.ts` enforces symmetric deliverable + queue presence (line 105-110), every agent's output passes through Zod schemas (per-vuln-type, lines 84-88), AND those schemas are also exported as JSON Schema draft-07 for downstream tooling. Strix is the only system that uses **XML-based tool invocations**, its `utils.py` actively normalises JSON-style tags into XML format (line 24), a deliberate choice that simplifies parsing for some LLMs. **Parallel tool waves**, the ability to execute multiple independent tools concurrently inside a single agent step, exists in RedAmon (Pydantic-validated `ToolPlan` run via `asyncio.gather`), PentAGI (Go goroutines), and Shannon (Temporal phase-internal parallelism), but is absent from PentestGPT (sequential by design) and the audit could not confirm it inside a single agent step in Strix despite its async-task usage (Strix's `asyncio.create_task` is used for tool isolation, not wave parallelism). RedAmon is also the only system with **tool-mutex groups**: `TOOL_MUTEX_GROUPS = {'metasploit': frozenset({'metasploit_console', 'msf_restart'})}` prevents two concurrent fireteam members or two parallel wave steps from claiming Metasploit at the same time, which would corrupt the singleton's session state. The **dangerous-tool confirmation gate** is RedAmon-only across the entire benchmark, the other systems treat tool execution as automatic regardless of risk, and only RedAmon's gate operates *per-wave* (one Allow/Deny covering every dangerous tool in a parallel plan). The aggregate (RedAmon 6.0, Shannon 4.5, PentAGI 2.5, Strix 2.0, PentestGPT 1.0) reflects this multi-mechanism lead.
-
-**Operational implications for the operator.** Tool integration architecture decides *what happens when the operator wants to add a new tool*. With RedAmon, adding a tool means writing a small MCP server (or extending an existing one) and updating one registry entry; the orchestrator code is untouched. With Shannon's Zod-gated approach, adding a tool means writing a Zod schema for its output and a TypeScript activity that calls it, strict but heavier. With Strix's XML format, adding a tool requires updating the XML parser registry. With PentAGI, tools are baked into the Go codebase under `backend/pkg/tools/` and adding one is a Go contribution. With PentestGPT, "tools" are bash commands the LLM types into the terminal, there is no tool framework to integrate with. The dangerous-tool confirmation gate matters in a separate way: it determines whether the platform can be trusted to run autonomously overnight. RedAmon's gate makes that safe; the others either require constant operator supervision or accept the risk of unintended damage. For an organisation deploying an AI pentester to scale across multiple operators, RedAmon's combination of *MCP swappability* + *mutex protection* + *confirmation gates* is materially less risky than any other configuration.
-
-### 6. Self-Correction & Recovery
-
-How the agent recovers from parse errors, stuck loops, and tool failures.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Parse-retry on malformed output | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| Strategic replanning ("Deep Think") | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Attack-path fallback (secondary path) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Exponential backoff on transient errors | ✅ | ⚠️ | ⚠️ | ✅ | ✅ |
-| Stuck-loop / iteration-cap detection | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| Repeated-call detection | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Classified error-code taxonomy | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **Subtotal (max 7.0)** | **6.0** | **4.5** | **1.5** | **3.0** | **4.0** |
-
-**What each row in this matrix means.** Self-correction is *what the agent does when something goes wrong*. *Parse-retry on malformed output* asks whether the system retries the LLM call (with the parser error attached as context) when the model emits invalid JSON or a malformed tool call. *Strategic replanning ("Deep Think")* asks whether the agent has a dedicated mechanism for stepping back and re-evaluating its overall approach when local progress stalls, distinct from just retrying the failed step. *Attack-path fallback* asks whether the system can switch to a secondary attack path (e.g. brute-force after CVE exploit fails) without operator intervention. *Exponential backoff on transient errors* asks whether retries use increasing delays to avoid hammering a slow target or rate-limited API. *Stuck-loop / iteration-cap detection* asks whether the system detects when the agent is making no progress and forces a pivot or termination. *Repeated-call detection* asks whether the system notices when the agent tries the same tool with the same arguments multiple times and breaks the loop. *Classified error-code taxonomy* asks whether errors are categorised (retryable vs. non-retryable, transient vs. permanent) rather than treated as opaque exceptions.
-
-**What the comparison reveals.** Self-correction is one of the more even dimensions in the benchmark, every system except PentestGPT has parse retry, stuck-loop detection, and exponential backoff in some form. Three systems differentiate meaningfully. **RedAmon** combines a strategic Deep Think pre-step (triggered on first iteration, phase transition, an unproductive-streak detection over the last N steps, or LLM self-request) with attack-path fallback (the classifier emits a `secondary_attack_path` for when the primary fails) and a **productivity-verdict + same-pattern fingerprint audit** that catches repeated-call loops even when each call reports a 200-OK success, making it the only system that has *both* tactical correction (retry the step) and *strategic* correction (pivot the whole approach) and that detects *successful-but-useless* repetition (the keyword-only detectors in other systems miss this). **PentAGI** has the strongest *internal* self-correction via its `Reflector` MsgchainType (a dedicated agent role that reviews other agents' outputs and triggers replanning) and its repeated-call detector. **Shannon** has the only **classified error-code taxonomy** in the benchmark, its Temporal workflow distinguishes retryable infrastructure errors (network, rate-limit) from non-retryable logic errors (schema validation, scope violation), with separate retry policies for each (`workflows.ts:52-114`). **PentestGPT** has minimal self-correction in its current code path; the legacy v0.15 had retry decorators but the active v1.0 codebase relies primarily on operator pause/resume to recover from problems. The aggregate (RedAmon 6.0, PentAGI 4.5, Shannon 4.0, Strix 3.0, PentestGPT 1.5) reflects RedAmon's lead.
-
-**Operational implications for the operator.** Self-correction determines *how long the agent can run unattended before the operator has to intervene*. With RedAmon's Deep Think + attack-path fallback, an agent that fails the primary CVE exploit path will autonomously try a secondary brute-force path before giving up and asking the operator. With PentAGI's Reflector, output quality stays consistent over long runs because there is a dedicated review agent watching for drift. With Shannon's error taxonomy, transient infrastructure failures are silently retried (Temporal's job) while logic errors immediately escalate, the operator only sees the errors that actually require their attention. With Strix, the agent will try several variations of a failed step but lacks the strategic pivot mechanism. With PentestGPT, the operator must watch the screen because the agent will not recover from an unexpected failure without help. For overnight or weekend autonomous runs, RedAmon's strategic-correction layer is the difference between waking up to a completed engagement vs. waking up to an agent stuck on iteration 3.
-
-### 7. Guardrails & Scope Control
-
-What stops the agent from acting outside the engagement scope.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Deterministic domain blocklist (code-level) | ✅ | ❌ | ❌ | ❌ | ⚠️ |
-| LLM-based scope check (soft rail) | ✅ | ❌ | ❌ | ⚠️ | ❌ |
-| Phase-gated action whitelist | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Rules-of-engagement (RoE) framework | ✅ | ❌ | ❌ | ❌ | ⚠️ |
-| Tool-confirmation gate | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Phase-transition approval gate | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Scope-drift detector | ✅ | ❌ | ❌ | ⚠️ | ⚠️ |
-| Recursive-agent-deployment ban | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Subtotal (max 8.0)** | **8.0** | **0.0** | **0.0** | **1.0** | **2.0** |
-
-**What each row in this matrix means.** Guardrails determine *what stops the agent from doing something it should not do*. *Deterministic domain blocklist (code-level)* asks whether the system has a hard-coded list of forbidden targets (e.g. .gov, .mil, intergovernmental orgs) that cannot be bypassed by configuration. *LLM-based scope check (soft rail)* asks whether the system asks an LLM at session start whether the requested target is appropriate. *Phase-gated action whitelist* asks whether the agent's tool vocabulary changes depending on phase (an agent in informational phase cannot call exploitation tools). *Rules-of-engagement (RoE) framework* asks whether the system encodes a customer-engagement contract (time windows, scope exclusions, technique gating, severity caps) that the agent must respect. *Tool-confirmation gate* asks whether the system pauses for human approval before executing dangerous tools. *Phase-transition approval gate* asks whether transitions between informational / exploitation / post-exploitation require explicit operator approval. *Scope-drift detector* asks whether the system notices when the agent is acting outside the authorised target list and intervenes. *Recursive-agent-deployment ban* asks whether the system prevents agents from spawning sub-agents indefinitely (a nested fan-out that could exhaust resources or escape oversight).
-
-**What the comparison reveals.** This is the dimension with the **widest gap in the entire benchmark**, RedAmon scores 8.0/8.0; the nearest competitor (Shannon) scores 2.0/8.0; both PentestGPT and PentAGI score 0.0/8.0. The 2026-04-19 audit confirmed by direct grep that PentAGI has zero scope-enforcement code anywhere in `pkg/`, its `guardrail.go` is a Langfuse observability span wrapper, not a security mechanism. PentestGPT's system prompt offers methodology guidance ("if stuck for more than a few attempts, try different attack vectors") but no enforcement. **RedAmon** is the only system that combines all 8 layers: a deterministic non-disableable domain blocklist (TLD patterns + ~200-domain set covering .gov / .mil / .edu / .int / IGOs, mirrored byte-for-byte in TypeScript for frontend pre-flight), an LLM-based soft scope check, phase-gated tool whitelisting via `TOOL_PHASE_MAP`, the ~35-setting RoE framework, the dangerous-tool confirmation gate, the phase-transition approval gate, the runtime scope-drift detector, and the recursive-agent-deployment ban (Fireteam members cannot themselves deploy fireteams). **Shannon** scores 2.0 by virtue of its phase-gated execution (each Temporal phase has a defined set of allowed activities) and its target-type validation. **Strix** has only a soft scope reminder in the prompt, guidance, not enforcement.
-
-**Operational implications for the operator.** The guardrail stack determines *whether the platform can be trusted with paying customer engagements* rather than just demonstrations. With RedAmon, the agent cannot scan a non-authorised target even if the operator types it into the chat, the hard rail blocks at the agent layer and the frontend pre-blocks before the request reaches the agent. With Shannon, the operator can constrain phases but the target itself is not validated against an enforced scope. With Strix, PentAGI, and PentestGPT, the operator is the only line of defence, if they paste the wrong target, the agent will scan it. For an organisation pitching to a regulated customer (financial services, healthcare, government supply chain), a platform without an enforced scope check is a non-starter regardless of how good its other features are. This category is also the one where the **disclosure obligation is most acute**: a benchmark authored by RedAmon will tend to over-detail dimensions where RedAmon leads. External independent re-scoring is invited; the source of every other system is linked in the systems-under-comparison table above and any reviewer can verify these zero-scores by direct grep.
-
-### 8. Human-in-the-Loop
-
-How the operator interacts with the running agent.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Pause / resume mid-run | ✅ | ⚠️ | ✅ | ⚠️ | ❌ |
-| Mid-run instruction injection | ⚠️ | ❌ | ✅ | ❌ | ❌ |
-| Approval gates (phase / tool) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Real-time streaming of agent reasoning | ✅ | ✅ | ✅ | ✅ | ⚠️ |
-| Per-tool cancellation | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Subtotal (max 5.0)** | **4.5** | **1.5** | **3.0** | **1.5** | **0.5** |
-
-**What each row in this matrix means.** Human-in-the-loop is *what the operator can do while the agent is running*. *Pause / resume mid-run* asks whether the operator can interrupt the agent and resume it later from the same state. *Mid-run instruction injection* asks whether the operator can send new context to the running agent without restarting it (e.g. "focus on port 22 next"). *Approval gates (phase / tool)* asks whether the system can require explicit operator approval for sensitive actions before they execute. *Real-time streaming of agent reasoning* asks whether the operator sees the agent's thinking and tool execution as it happens, rather than only seeing final results. *Per-tool cancellation* asks whether the operator can kill a single running tool (e.g. a long nmap scan) without halting the entire agent.
-
-**What the comparison reveals.** Real-time streaming is now **table stakes**, every system except Shannon supports it (Shannon's Temporal workers are ephemeral and report only the final result; the operator polls Temporal Web UI for progress, not a live stream). The other four rows split the field meaningfully. **PentestGPT** is the operator-experience champion for *instruction injection*: its TUI offers keyboard-driven pause (Ctrl+P), resume, and arbitrary text injection without leaving the terminal. **RedAmon** has the only **layered approval model**, four distinct pause points (phase transition, dangerous tool, agent question, per-fireteam-member approval) that all use the same underlying state-machine machinery. **RedAmon** is also the only system with **per-tool cancellation**: the operator can kill a specific running tool by composite key (`session|wave|step|tool`) without affecting other concurrent tools or the agent's overall state. **PentAGI** offers partial pause via its "waiting" flow status but only for prompt-driven user-input gates, not arbitrary interruption. **Strix** has tool-output streaming but no first-class pause/resume. **Shannon** is the weakest in this category because its architecture (ephemeral per-scan Temporal workers) is fundamentally incompatible with interactive human oversight, the trade-off it makes for durability. The aggregate (RedAmon 4.5, PentestGPT 3.0, PentAGI 1.5, Strix 1.5, Shannon 0.5) reflects how rare *layered* approval gates are.
-
-**Operational implications for the operator.** Human-in-the-loop capability decides *how the operator works with the agent during long engagements*. With RedAmon, the operator can let the agent run for hours, occasionally swiping through fireteam member panels to approve dangerous tools, periodically stopping a single slow tool, and stepping away knowing that any phase transition will require their approval before proceeding. With PentestGPT, the operator stays in the terminal but enjoys the most fluid pause-inject-resume loop in the benchmark, ideal for tight CTF-style sessions where the operator is actively guiding every step. With PentAGI and Strix, the operator's intervention options are limited to "let it run" or "kill it"; mid-run steering is not really supported. With Shannon, intervention is essentially "wait for it to finish, then read the report." For multi-hour engagements where the operator must be able to step away and trust the agent will pause before doing anything irreversible, RedAmon's layered approval model is the only configuration that matches that workflow.
-
-### 9. Isolation & Multi-Tenancy
-
-Whether multiple operators on multiple projects can safely share an installation.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Tenant context propagation (user + project + session) | ✅ | ⚠️ | ❌ | ❌ | ❌ |
-| Multi-tenant data separation | ✅ | ⚠️ | ❌ | ❌ | ❌ |
-| Sandbox isolation for tool execution | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Session isolation | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| **Subtotal (max 4.0)** | **4.0** | **3.0** | **2.0** | **1.5** | **2.0** |
-
-**What each row in this matrix means.** Isolation determines *whether multiple operators on multiple projects can safely share a single installation of the platform*. *Tenant context propagation (user + project + session)* asks whether a `(user_id, project_id, session_id)` triple is captured at request entry and propagated through every internal call, including async tasks and sub-agent spawns. *Multi-tenant data separation* asks whether queries to shared storage (database, knowledge graph) automatically filter by tenant, even when the LLM-generated query doesn't mention the tenant. *Sandbox isolation for tool execution* asks whether tool invocations run inside an isolated container or VM, so a tool crash or a destructive command cannot affect the host or other tenants. *Session isolation* asks whether two sessions on the same project (e.g. one operator running an active scan while another reviews a previous report) have independent state and cannot interfere with each other.
-
-**What the comparison reveals.** Sandbox isolation is **universal**, every system runs tools inside Docker containers (RedAmon's Kali sandbox, PentAGI's per-flow Docker SDK wrapper, PentestGPT's Docker mount, Strix's `DockerRuntime`, Shannon's per-scan Docker container). Session isolation is also widespread, with only Strix scoring partial because its dynamic agents share runtime state more intimately than the others. The decisive rows are *tenant context propagation* and *multi-tenant data separation*. **RedAmon** is the **only system designed from day one as multi-tenant**: a `ContextVar` captures the tenant triple at every async-task creation point, every Neo4j Cypher query is automatically rewritten by `Neo4jToolManager` to inject `WHERE n.user_id = ... AND n.project_id = ...` (the LLM never gets to write that part, so even a deliberately malicious or hallucinated query cannot leak data), and LangGraph checkpoints are keyed by session ID. **PentAGI** has partial multi-tenancy via its PostgreSQL-backed flow state, a flow is owned by a user, but the audit found no automatic filter injection at the database layer. **PentestGPT, Strix, and Shannon** are single-tenant tools, safe for solo use, but installing one for a team would require either one installation per operator or operator-managed discipline to keep projects from cross-contaminating. The aggregate (RedAmon 4.0, PentAGI 3.0, Shannon 2.0, PentestGPT 2.0, Strix 1.5) reflects the fundamental design choice between "operator-machine tool" and "shared platform."
-
-**Operational implications for the operator.** Multi-tenancy decides *the shape of the deployment*. With RedAmon, a single backend installation safely serves an entire pentest team; operators log in with their own credentials, see only their own projects, and can collaborate on a project without seeing other teams' work. The cost is one Postgres + one Neo4j + one MCP sandbox shared across the team. With PentAGI, a single installation can serve a small team but requires careful operational discipline because data separation is partial. With Strix, PentestGPT, and Shannon, the natural deployment model is one installation per operator (or per laptop). For a small consultancy where one operator does all the engagements, this difference is invisible, those tools work fine. For a regulated engagement where an audit must prove that operator A on customer X's engagement could not have read operator B's data on customer Y's engagement, only RedAmon provides that guarantee at the architecture level.
-
-### 10. Domain Knowledge Integration
-
-Whether the agent can query structured infosec knowledge beyond what's in its weights.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| External knowledge base queryable by agent | ✅ | ❌ | ❌ | ❌ | ❌ |
-| CVE / CWE database lookup | ✅ | ❌ | ❌ | ❌ | ❌ |
-| MITRE mapping (CWE / CAPEC / ATT&CK) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Curated prompt / skill library | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| Web-search integration | ✅ | ✅ | ❌ | ✅ | ❌ |
-| **Subtotal (max 5.0)** | **5.0** | **2.0** | **0.5** | **2.0** | **1.0** |
-
-**What each row in this matrix means.** Domain knowledge integration is *what the agent can look up beyond what's in its trained weights*. *External knowledge base queryable by agent* asks whether the agent can issue queries against a curated infosec corpus (vector-indexed, retrieval-augmented) and receive structured answers it can act on. *CVE / CWE database lookup* asks whether the agent can resolve a CVE identifier or a CWE category and retrieve current metadata (CVSS, EPSS, KEV flag, affected versions). *MITRE mapping (CWE / CAPEC / ATT&CK)* asks whether the agent can translate between security taxonomies, a finding's CWE → its CAPEC attack pattern → the relevant ATT&CK techniques. *Curated prompt / skill library* asks whether the system ships expert playbooks the agent can invoke. *Web-search integration* asks whether the agent can query live web search engines (DuckDuckGo, Tavily, etc.) when the KB cannot answer.
-
-**What the comparison reveals.** Every system that has any skill or prompt library claims "domain knowledge integration," but the matrix exposes a sharp split between **structured knowledge access** (queryable databases the agent can reason over) and **unstructured prompt assistance** (markdown playbooks the LLM reads). **RedAmon** is the only system in the structured tier, it offers a queryable knowledge base over 7 curated infosec sources with vector RAG and cross-encoder reranking, a CVE/CWE database lookup that returns CVSS + EPSS + CISA KEV metadata, and a MITRE mapping that resolves CWE → CAPEC → ATT&CK relationships. The agent can issue queries like *"list all CVEs affecting nginx 1.18 with CISA KEV flag set"* and receive a structured result it can immediately act on. **PentAGI** has 6 web-search backends (DuckDuckGo, Tavily, Google, Perplexity, Traversaal, Searxng) and a prompt template library, but no CVE database, no MITRE mapping, no queryable KB. **Strix** has its skill library (`strix/skills/`) and web search but the same lack of structured lookups. **Shannon** has a YAML config-based skill / role library but no live knowledge access. **PentestGPT** has neither, it relies entirely on the LLM's pre-trained knowledge, which for a Claude-based agent in early 2026 is stale by 6-12 months on CVE specifics. The aggregate (RedAmon 5.0, PentAGI 2.0, Strix 2.0, Shannon 1.0, PentestGPT 0.5) is one of the largest single-system leads in the benchmark.
-
-**Operational implications for the operator.** Domain knowledge integration decides *whether the agent's recommendations are current*. When the agent encounters nginx 1.18, RedAmon can immediately query its CVE database for known vulnerabilities affecting that exact version and return KEV-flagged exploits the agent should try first. The other systems must rely on either web search (slow, unstructured, sometimes wrong) or the LLM's training cutoff (which may not know about a CVE published last month). For CTF-style engagements where the targets are intentionally vulnerable to well-known CVEs, this gap matters less. For real customer engagements where the operator must justify *why* the agent recommended a specific exploit ("we tried CVE-2024-XXXX because it's CISA KEV with EPSS 0.94 affecting your exact nginx version"), only RedAmon can produce that traceable evidence chain. The MITRE mapping is what makes the post-engagement report defensible to compliance teams who think in CWE / CAPEC / ATT&CK rather than raw findings.
-
-### 11. Observability & Cost Tracking
-
-Whether the operator can audit, replay, and budget agent runs.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Per-step execution trace persisted | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| Langfuse integration | ❌ | ✅ | ✅ | ❌ | ❌ |
-| OpenTelemetry / Traceloop / Jaeger | ❌ | ✅ | ❌ | ✅ | ❌ |
-| Per-request cost tracking | ⚠️ | ✅ | ✅ | ✅ | ✅ |
-| WebSocket / streaming event protocol | ✅ | ✅ | ✅ | ✅ | ❌ |
-| **Subtotal (max 5.0)** | **2.5** | **5.0** | **3.5** | **4.0** | **2.0** |
-
-**What each row in this matrix means.** Observability decides *how the operator audits, debugs, and budgets agent runs*. *Per-step execution trace persisted* asks whether every think iteration, every tool call, every output is written to durable storage in a structured format. *Langfuse integration* asks whether the system ships first-class integration with Langfuse, the LLM-observability platform that tracks generations, prompts, costs, and latencies as a unified view. *OpenTelemetry / Traceloop / Jaeger* asks whether the system emits OTLP-compliant traces to industry-standard distributed-tracing backends. *Per-request cost tracking* asks whether every LLM call's token usage is recorded and converted to USD. *WebSocket / streaming event protocol* asks whether the system exposes a real-time event stream that the frontend can subscribe to (rather than polling for state).
-
-**What the comparison reveals.** This is **PentAGI's category**, and the only category in the entire benchmark where RedAmon is not in the top half. PentAGI ships a full out-of-the-box observability stack: Langfuse for LLM-generation tracking, OpenTelemetry tracing flowing into Jaeger, VictoriaMetrics for metrics, Loki for logs, with the entire pipeline wired up via `docker-compose-observability.yml`. The audit confirmed all five components are deployable as a single command. **PentestGPT** has Langfuse integration in its current code path (`pentestgpt/core/langfuse.py` is imported by `controller.py` and `interface/main.py`) plus per-request cost tracking, plus WebSocket streaming, all clean. **Strix** has OpenTelemetry + Traceloop integration but no Langfuse, plus its own per-event JSONL tracer. **RedAmon** currently has the weakest observability footprint: it persists per-step traces and emits a comprehensive WebSocket event stream, but does not ship Langfuse or OpenTelemetry integration and only partially tracks cost (token counts, not USD conversion). **Shannon** writes append-only audit logs to JSONL files but has no streaming protocol, its operator polls Temporal Web UI or tails log files. The aggregate (PentAGI 5.0, Strix 4.0, PentestGPT 3.5, RedAmon 2.5, Shannon 2.0) is the only category where RedAmon ranks fourth.
-
-**Operational implications for the operator.** Observability gaps surface differently for different deployments. With PentAGI's full stack, an operator running the platform at scale can see in Grafana dashboards which agent role costs the most tokens, which target takes the longest, which tool fails most often, production-grade visibility from day one. With PentestGPT's Langfuse integration, the same per-call cost visibility is available without the operator running a metrics stack. With RedAmon, the operator gets per-step traces and a live WebSocket event feed (sufficient for audit and debugging during the run) but must build their own dashboards and cost rollups if they want production-grade telemetry. The internal benchmark's §5.1.8 explicitly acknowledges this as a known gap, and a Langfuse + OpenTelemetry integration is on the roadmap. For an organisation that already runs a metrics platform (Datadog, Grafana, etc.) and wants the AI pentester's signals to feed into existing dashboards, PentAGI is the easiest fit out of the box; RedAmon would require integration work today.
-
-### 12. Persistence & Recovery
-
-What survives a backend crash.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| LangGraph checkpointing | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Temporal-class durable state | ❌ | ❌ | ❌ | ❌ | ✅ |
-| JSON / file session auto-save | ✅ | ✅ | ✅ | ❌ | ⚠️ |
-| Workspace / git-checkpoint resume | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **Subtotal (max 4.0)** | **2.0** | **1.0** | **1.0** | **0.0** | **2.5** |
-
-**What each row in this matrix means.** Persistence and recovery decide *what survives a backend crash*. *LangGraph checkpointing* asks whether the system uses LangGraph's built-in checkpointer (Postgres, Redis, or memory) to snapshot agent state after every node transition. *Temporal-class durable state* asks whether the system uses a workflow orchestrator like Temporal that records each activity's input/output and can replay the workflow deterministically on crash. *JSON / file session auto-save* asks whether the system periodically writes session state to a file so that a manual restart can pick up where it left off. *Workspace / git-checkpoint resume* asks whether the system snapshots a workspace directory (e.g. with git commits) so the operator can resume from a specific point.
-
-**What the comparison reveals.** This is **Shannon's category**, Temporal gives Shannon the strongest durability story in the benchmark. Each agent activity is a Temporal-tracked unit of work; a backend crash mid-run can be resumed by replaying the workflow from the last successful activity boundary, with all intermediate state reconstructed deterministically. Shannon also adds workspace-level git checkpoints so the operator can rewind to any prior point. **RedAmon** is one tier below: its `AsyncPostgresSaver` checkpointer snapshots state after every LangGraph node transition, so state survives a crash, but recovery means re-entering the graph and re-running the current node from scratch (the node's prior partial work is lost). **PentAGI** writes flow state to PostgreSQL but has no automatic resume on backend restart, recovery requires manual operator intervention. **PentestGPT** writes a JSON session file (`~/.pentestgpt/sessions/`) that allows manual rerun from prior context. **Strix** has no persistence whatsoever, a crash loses the entire run. The aggregate (Shannon 2.5, RedAmon 2.0, PentAGI 1.0, PentestGPT 1.0, Strix 0.0) is the most polarised category in the benchmark.
-
-**Operational implications for the operator.** Persistence determines *whether long autonomous runs are viable on infrastructure with any failure rate*. With Shannon, a backend restart mid-run is invisible to the operator, the workflow resumes within seconds of the worker coming back up, with no state loss and no operator action required. With RedAmon, a backend restart is recoverable but requires the operator to click resume; the agent picks up at the last node boundary, losing at most one node's worth of in-flight work. With PentAGI and PentestGPT, manual file-based resume is possible but operationally awkward. With Strix, a crashed run must be restarted from scratch. For overnight or multi-day engagements running on cloud infrastructure where pre-emption, deploys, and rolling restarts are routine, Shannon's Temporal durability is decisive, no other system can promise zero-touch recovery. RedAmon's checkpointer is sufficient for engagements where the backend is stable enough that resume is occasional rather than routine; for chaos-testing-grade reliability, the Temporal model is genuinely stronger.
-
-### 13. LLM Provider Flexibility
-
-How portable the agent is across model providers.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Multi-provider native support (≥ 5 families) | ⚠️ | ✅ | ❌ | ✅ | ❌ |
-| litellm / unified abstraction | ❌ | ❌ | ❌ | ✅ | ❌ |
-| OpenAI-compatible endpoint support | ✅ | ✅ | ⚠️ | ✅ | ❌ |
-| Per-agent / per-task model override | ⚠️ | ✅ | ❌ | ✅ | ✅ |
-| **Subtotal (max 4.0)** | **2.0** | **3.0** | **0.5** | **4.0** | **1.0** |
-
-**What each row in this matrix means.** LLM provider flexibility decides *whether the platform can swap models without code changes*. *Multi-provider native support (≥ 5 families)* asks whether the system has first-class integration with at least five distinct provider families (OpenAI, Anthropic, Google, AWS Bedrock, Mistral, etc.). *litellm / unified abstraction* asks whether the system uses litellm or a similar unified library that auto-translates between provider APIs and exposes a single interface. *OpenAI-compatible endpoint support* asks whether the system can talk to any OpenAI-compatible endpoint (vLLM, Ollama, LiteLLM proxy, etc.), important for self-hosted models. *Per-agent / per-task model override* asks whether different agents or different tasks can use different models (e.g. a cheap model for the orchestrator, an expensive model for the exploitation specialist).
-
-**What the comparison reveals.** This is **Strix's category** by a clear margin. litellm integration gives Strix immediate access to 100+ models across every major provider, with per-task reasoning-effort configuration and unified handling of thinking tokens, tool calling, and streaming. **PentAGI** has the broadest native list, 12+ providers (OpenAI, Anthropic, Gemini, AWS Bedrock, Ollama, DeepSeek, GLM, Kimi, Qwen, plus custom HTTP endpoints) all wired directly into its Go LLM layer, plus per-agent model overrides via its `MsgchainType` configuration. **RedAmon** supports its primary providers (Anthropic, OpenAI) natively with OpenAI-compatible endpoint support, but does not yet have litellm-style unified abstraction and only partially supports per-task overrides (the root agent and fireteam members can use different models, but it requires explicit configuration). **Shannon** and **PentestGPT** (current version) are **Claude-only**, both depend on the Claude Agent SDK, which is Anthropic-exclusive; switching providers would require rewriting the LLM layer entirely. The aggregate (Strix 4.0, PentAGI 3.0, RedAmon 2.0, Shannon 1.0, PentestGPT 0.5) reflects how decisively litellm wins this dimension.
-
-**Operational implications for the operator.** Provider flexibility decides *what the operator does when the chosen model becomes unavailable, expensive, or insufficient*. With Strix, swapping from Claude to GPT-4 is a configuration change. With PentAGI, swapping is a configuration change for any of 12 supported providers. With RedAmon, swapping between Anthropic and OpenAI works out of the box; adding a new provider family would require code work. With Shannon and PentestGPT, "swapping" means migrating to a different system entirely. For an organisation that wants to compare model performance across providers, evaluate cost optimisation by routing different agents to different tiers, or hedge against provider availability incidents, Strix is the operationally most flexible choice; PentAGI a strong second. For organisations standardised on Claude (who consider Anthropic-exclusive integration a feature rather than a limitation), Shannon and PentestGPT are perfectly reasonable.
-
-### 14. Finding-Quality Primitives
-
-How findings are validated, deduplicated, and ranked before they reach the report.
-
-| Capability | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|
-| LLM-based finding deduplication | ✅ | ❌ | ❌ | ✅ | ⚠️ |
-| Mandatory PoC validation before reporting | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Confidence scoring on findings | ✅ | ❌ | ❌ | ✅ | ✅ |
-| Schema-validated finding queues | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **Subtotal (max 4.0)** | **2.0** | **0.0** | **0.0** | **3.0** | **3.5** |
-
-**What each row in this matrix means.** Finding-quality primitives decide *how reliable the agent's reported findings are*. *LLM-based finding deduplication* asks whether the system uses an LLM (not just regex matching) to detect when the agent has reported the same finding twice in different words. *Mandatory PoC validation before reporting* asks whether the system enforces, at the code level, not just the prompt, that no finding can be reported without a verified proof-of-concept. *Confidence scoring on findings* asks whether each finding carries an explicit confidence level (numeric or categorical) that the operator can use to triage. *Schema-validated finding queues* asks whether findings flow through a strict typed pipeline that rejects malformed entries before they reach the report.
-
-**What the comparison reveals.** This is **Shannon's category, with Strix close behind**. Shannon enforces a hard code-level gate: exploitation only runs if the vulnerability-analysis phase produced a structured `Vulnerability` object that passes Zod schema validation AND the corresponding deliverable file exists (`queue-validation.ts:105-110` enforces the symmetric check). No PoC, no exploit. The schema is per-vulnerability-type with required fields including confidence (`queue-schemas.ts:84-88`). **Strix** has functional LLM-based deduplication (`strix/llm/dedupe.py` uses XML-parsed responses, lines 111-139) and verdict logic in its exploitation checker, plus confidence scoring on findings. **RedAmon** has confidence scoring and dedup as part of its `OutputAnalysisInline` schema, but does not currently mandate PoC validation as a release gate, the agent can report a finding before a PoC is verified, which is a real gap acknowledged in the chapter's caveats. **PentAGI** has none of these primitives in code (no dedup, no PoC gate, no confidence scoring beyond what ends up in the report's prose). **PentestGPT** has flag detection via regex (HTB / CTF / `flag{}` / 32-char hex) but no PoC validation or confidence scoring, appropriate for CTF-style sessions but not for professional vulnerability reporting. The aggregate (Shannon 3.5, Strix 3.0, RedAmon 2.0, PentestGPT 0.0, PentAGI 0.0) puts Shannon clearly on top.
-
-**Operational implications for the operator.** Finding-quality primitives decide *how much manual review the operator must perform on the agent's report before delivering it to the customer*. With Shannon's mandatory PoC gate, the operator can trust that every reported vulnerability has been demonstrated working, no false positives sneak through to the report. With Strix's deduplication and confidence scoring, the operator can sort findings by confidence and quickly review the low-confidence ones. With RedAmon, the operator gets confidence scoring to triage by but must still manually verify findings before delivery, the agent will report what it believes it has found, even if a PoC is missing. With PentAGI and PentestGPT, the operator must verify every finding manually because there is no in-platform quality gate. For an organisation delivering pentests to paying customers where reputational damage from false positives is high, Shannon's PoC-mandatory architecture is genuinely the strongest in the benchmark, and a feature RedAmon should adopt. The gap is a known design priority for the next major release.
-
-### Aggregate Coverage
-
-Sum of all 14 category subtotals, normalised to 100 %.
-
-| Category | Max | RedAmon | PentAGI | PentestGPT | Strix | Shannon |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| 1. Orchestration & topology | 9.0 | 5.5 | 2.5 | 1.0 | 4.0 | 4.0 |
-| 2. Control flow | 6.0 | 4.0 | 2.5 | 3.5 | 2.5 | 2.0 |
-| 3. Task decomposition | 5.0 | 2.0 | 1.5 | 1.0 | 1.5 | 1.5 |
-| 4. Memory & context | 8.0 | 6.0 | 4.0 | 1.0 | 4.0 | 1.5 |
-| 5. Tool selection & use | 8.0 | 6.0 | 2.5 | 1.0 | 2.0 | 4.5 |
-| 6. Self-correction & recovery | 7.0 | 5.5 | 4.5 | 1.5 | 3.0 | 4.0 |
-| 7. Guardrails & scope | 8.0 | 8.0 | 0.0 | 0.0 | 1.0 | 2.0 |
-| 8. Human-in-the-loop | 5.0 | 4.5 | 1.5 | 3.0 | 1.5 | 0.5 |
-| 9. Isolation & multi-tenancy | 4.0 | 4.0 | 3.0 | 2.0 | 1.5 | 2.0 |
-| 10. Domain knowledge integration | 5.0 | 5.0 | 2.0 | 0.5 | 2.0 | 1.0 |
-| 11. Observability & cost | 5.0 | 2.5 | 5.0 | 3.5 | 4.0 | 2.0 |
-| 12. Persistence & recovery | 4.0 | 2.0 | 1.0 | 1.0 | 0.0 | 2.5 |
-| 13. LLM provider flexibility | 4.0 | 2.0 | 3.0 | 0.5 | 4.0 | 1.0 |
-| 14. Finding-quality primitives | 4.0 | 2.0 | 0.0 | 0.0 | 3.0 | 3.5 |
-| **TOTAL** | **82.0** | **59.0** | **33.0** | **19.5** | **34.0** | **32.0** |
-| **Coverage** | 100 % | **72.0 %** | **40.2 %** | **23.8 %** | **41.5 %** | **39.0 %** |
-| **Rank** |, | **1** | 3 | 5 | **2** | 4 |
-
-### Where Each System Leads, An Impartial Read
-
-The aggregate score is the headline; the **leadership map** is the substance. Each system has at least one category where it sits at the top of the table, and recognising those leads honestly is the only way the comparison is credible.
-
-**RedAmon leads on:** Guardrails (8.0 / 8.0; nearest 2.0), Domain knowledge (5.0 / 5.0; nearest 2.0), Multi-tenancy (4.0 / 4.0; nearest 3.0), Tool selection (6.0 / 8.0; nearest 4.5), Memory (6.0 / 8.0; nearest tied at 4.0), Human-in-the-loop (4.5 / 5.0; nearest 3.0), Task decomposition (2.0 / 5.0; nearest 1.5), Control flow (4.0 / 6.0; nearest 3.5). The pattern is **enterprise-engagement-readiness**: safety, scope, multi-tenant isolation, structured intelligence, layered human oversight.
-
-**PentAGI leads on:** Observability (5.0 / 5.0; the full Langfuse + OpenTelemetry + Jaeger + VictoriaMetrics + Loki stack ships out of the box). It also has the broadest LLM provider list among the others (12+ native, with first-class Bedrock and Ollama support) and the most elaborate prompt-driven agent pool, 15 specialised `MsgchainType` roles (`primary_agent`, `pentester`, `coder`, `reporter`, `reflector`, `enricher`, `searcher`, `installer`, `memorist`, `adviser`, `summarizer`, `tool_call_fixer`, `assistant`, `generator`, `refiner`). PentAGI is the right pick for an operator who needs deep run-time telemetry, provider portability, and a richly differentiated agent vocabulary; it does not, however, ship any scope guardrails or tool-confirmation gates and assumes the operator owns those.
-
-**PentestGPT leads on:** Pause/resume UX through its TUI, with mid-run instruction injection via keyboard shortcuts. It is the cleanest single-agent thin-wrapper implementation in the benchmark, unmatched at what it sets out to do, but architecturally the shallowest.
-
-**Strix leads on:** LLM provider flexibility (4.0 / 4.0; litellm gives instant access to 100+ models with per-task overrides), dynamic agent topology (only system that spawns agents at runtime), and semantic memory compression. Strix is the right pick for research-style work where the operator wants the agent to *invent* its own coordination structure.
-
-**Shannon leads on:** Persistence and recovery (Temporal durable workflow), finding-quality primitives (Zod + JSON Schema strict validation, mandatory PoC gating), and conditional pipeline execution. Shannon is the right pick for engagements where every reported finding must be PoC-validated and where backend reliability is non-negotiable.
-
-### What This Comparison Does Not Measure
-
-This is a **feature-coverage matrix**, not a quality verdict. Three caveats:
-
-1. **Depth differs.** Two ✅ entries on the same row can implement the feature very differently. PentAGI's "structured output validation" is JSON-Schema-based; Shannon's combines Zod and JSON Schema draft-07; both score ✅ but Shannon's is genuinely stricter. The matrices are an inventory, not a depth audit.
-2. **Operational outcomes are not in this table.** Time-to-first-finding, false-positive rate, cost per target, scope-drift incidents, these are end-to-end metrics that require running each system against the same target list with the same model and the same time budget. The internal benchmark's §6 holds the harness for those measurements; the published numbers are pending.
-3. **Authorship bias is real.** This benchmark was authored by the RedAmon team. The categories where RedAmon's lead is widest (Guardrails 8.0 vs 2.0, Domain Knowledge 5.0 vs 2.0) are also the categories the authors know best in their own codebase. External independent scoring is invited; the underlying audit data and the systems' source repositories are linked above so any reviewer can re-score.
-
-The comparison should be read as: *given identical tools, identical models, and identical targets, this is which agentic primitives each system brings to the table*. What the operator does with those primitives, and which set of primitives matters most for their engagement, is the operator's call.
 
 ---
 

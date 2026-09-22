@@ -41,7 +41,11 @@ class _FakeSession:
         return False
 
     def run(self, query, params=None):
-        self.capture["q"] = query
+        # Since P0-4 the reads are wrapped in a neo4j.Query so they carry a
+        # transaction timeout. The assertions below are about the Cypher text,
+        # so unwrap it; `timeout` is asserted in test_graph_exec_bounds.py.
+        self.capture["q"] = getattr(query, "text", query)
+        self.capture["timeout"] = getattr(query, "timeout", None)
         self.capture["p"] = params or {}
         return []  # empty result set
 
@@ -50,7 +54,10 @@ class _FakeDriver:
     def __init__(self, capture):
         self.capture = capture
 
-    def session(self):
+    def session(self, **kwargs):
+        # The real driver takes default_access_mode (READ_ACCESS since the
+        # write-bypass fix); record it rather than rejecting it.
+        self.capture["session_kwargs"] = kwargs
         return _FakeSession(self.capture)
 
 

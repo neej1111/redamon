@@ -1210,7 +1210,7 @@ recon/graphql_scan/
 └── auth.py               # 5 auth modes (bearer/cookie/header/basic/apikey) with masked logs
 ```
 
-📖 **Detailed documentation:** [docs/readmes/GRAPH.SCHEMA.md — GraphQL-specific Endpoint & Vulnerability properties](GRAPH.SCHEMA.md) | **[Wiki: GraphQL Security Testing](https://github.com/samugit83/redamon/wiki/GraphQL-Security-Testing)**
+📖 **Detailed documentation:** [graph_db/schema_sections.md — GraphQL-specific Endpoint & Vulnerability properties](../../graph_db/schema_sections.md) | **[Wiki: GraphQL Security Testing](https://github.com/samugit83/redamon/wiki/GraphQL-Security-Testing)**
 
 ---
 
@@ -1323,7 +1323,7 @@ recon/wordlists/vhost-common.txt             # 2,471-entry default wordlist (shi
 graph_db/mixins/recon/vhost_sni_mixin.py     # Neo4jClient.update_graph_from_vhost_sni()
 ```
 
-📖 **Detailed documentation:** [docs/readmes/GRAPH.SCHEMA.md -- VHost/SNI Vulnerability properties + Subdomain/IP enrichment](GRAPH.SCHEMA.md) | **[Wiki: VHost & SNI Enumeration](https://github.com/samugit83/redamon/wiki/VHost-and-SNI-Enumeration)**
+📖 **Detailed documentation:** [graph_db/schema_sections.md -- VHost/SNI Vulnerability properties + Subdomain/IP enrichment](../../graph_db/schema_sections.md) | **[Wiki: VHost & SNI Enumeration](https://github.com/samugit83/redamon/wiki/VHost-and-SNI-Enumeration)**
 
 ---
 

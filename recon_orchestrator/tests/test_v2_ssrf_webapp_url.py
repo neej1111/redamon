@@ -24,6 +24,27 @@ ATTACKER = "http://attacker.evil.example:9999"
 SAFE = "http://localhost:3000"
 
 
+class _BenignProjectResponse:
+    """A reachable webapp answering with a project that passes the pre-flight.
+
+    Since P0-1 the guardrail / RoE pre-flight fails CLOSED, so a handler driven
+    against an unreachable webapp now refuses with 503 and never reaches the
+    spawn these tests are about. Satisfying the pre-flight keeps the assertion
+    on the SSRF invariant rather than on the pre-flight's behaviour.
+    """
+
+    status = 200
+
+    def read(self):
+        return b'{"targetDomain": "example.com", "ipMode": false}'
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _drive_start_recon(monkeypatch, client_webapp_url):
     """Call the real start_recon handler with container_manager mocked; return
     the kwargs the handler forwarded to container_manager.start_recon."""
@@ -34,6 +55,8 @@ def _drive_start_recon(monkeypatch, client_webapp_url):
         return types.SimpleNamespace(project_id=kwargs.get("project_id"), status="running")
 
     monkeypatch.setenv("SPAWNED_WEBAPP_API_URL", SAFE)
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda *a, **kw: _BenignProjectResponse())
     monkeypatch.setattr(api, "container_manager",
                         types.SimpleNamespace(start_recon=fake_start_recon))
     req = ReconStartRequest(project_id="p1", user_id="u1", webapp_api_url=client_webapp_url)

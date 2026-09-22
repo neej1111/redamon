@@ -11,6 +11,7 @@ import prisma from '@/lib/prisma'
 import { guardProject } from '@/lib/access'
 import { settingsFingerprint } from '@/lib/jobQueue'
 import { resolveTrufflehogFingerprintExtra } from '@/lib/trufflehogStart'
+import { authProfileFingerprintExtra } from '@/lib/authProfileFingerprint'
 
 export const runtime = 'nodejs'
 
@@ -43,11 +44,20 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
+    // Both contributions, exactly as enqueue and dispatch compute them. Folding
+    // in only the TruffleHog half stored a hash the dispatcher could not
+    // reproduce for a full_recon or partial_recon job, whose auth profile is a
+    // relation the Project-row fingerprint cannot see: the job was re-confirmed,
+    // dispatched, failed the comparison and went straight back to needs_review,
+    // with no way out for anyone.
     const settingsHash = settingsFingerprint(
       row.kind, project as unknown as Record<string, unknown>,
-      await resolveTrufflehogFingerprintExtra(
-        row.kind, row.projectId, (row.payload ?? {}) as Record<string, unknown>,
-      ),
+      {
+        ...(await resolveTrufflehogFingerprintExtra(
+          row.kind, row.projectId, (row.payload ?? {}) as Record<string, unknown>,
+        )),
+        ...(await authProfileFingerprintExtra(row.kind, row.projectId)),
+      },
     )
     await prisma.jobQueue.update({
       where: { id },

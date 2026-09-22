@@ -98,6 +98,41 @@ export async function withSnapshotSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** `{ acquired: false }` means no slot was free; `fn` was never called. */
+export type TrySlotResult<T> = { acquired: true; value: T } | { acquired: false }
+
+/**
+ * `withSnapshotSlot`, but it REFUSES instead of queueing.
+ *
+ * The blocking variant is right for the UI and activation paths: a person
+ * waiting a few seconds for a version to swap in is the intended behaviour, and
+ * `waiters` is how that is arranged.
+ *
+ * It is wrong for a caller that can give up, and the reason is specific.
+ * `waiters` is unbounded and holds no notion of the caller still being there,
+ * so racing the acquire against a timer does not cancel anything: the abandoned
+ * waiter stays queued, is resolved when a slot frees, and then runs `fn()` to
+ * completion for a caller that left - an orphaned full graph capture nobody is
+ * awaiting, still holding a slot the UI needs. Rate limiting does not help
+ * either, since it bounds arrivals while the queue absorbs the rest and
+ * executes every one of them.
+ *
+ * So: acquire only if a slot is free right now, and otherwise say so. It is a
+ * plain check with no await before the increment, which is what makes it safe
+ * against the interleaving the `while` above exists for.
+ */
+export async function tryWithSnapshotSlot<T>(fn: () => Promise<T>): Promise<TrySlotResult<T>> {
+  if (running >= snapshotMaxConcurrency()) return { acquired: false }
+  running += 1
+  try {
+    return { acquired: true, value: await fn() }
+  } finally {
+    running -= 1
+    const next = waiters.shift()
+    if (next) next()
+  }
+}
+
 /**
  * Read the project's live recon graph in export fidelity.
  *

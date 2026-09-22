@@ -19,7 +19,10 @@ export const reconPresetSchema = z.object({
   stealthMode: bool,
   aiInPipeline: bool,
   aiPipelineModel: str,
-  updateGraphDb: bool,
+  // `updateGraphDb` is deliberately absent. Off, a scan still runs and still
+  // reaches the target and writes nothing, so every later read says "nothing
+  // found" where the truth is "nothing was written". A preset that turned it off
+  // would produce a scan that looks clean rather than one that is.
   useBruteforceForSubdomains: bool,
 
   // -- WHOIS / DNS --
@@ -234,6 +237,14 @@ export const reconPresetSchema = z.object({
   supplyChainReconEnabled: bool,
   supplyChainReconEcosystems: str,
   supplyChainReconDeepAnalysisEnabled: bool,
+  // Six fields the catalog already documented but the schema would strip, so a
+  // preset the model wrote naming them applied nothing and said nothing.
+  supplyChainDeepAnalysisEnabled: bool,
+  supplyChainOrgDeepAnalysisEnabled: bool,
+  supplyChainTyposquatEnabled: bool,
+  trufflehogEnabled: bool,
+  githubMaxCommits: int,
+  gauVerifyThreads: int,
 
   // -- JS Analysis: JS Recon --
   jsReconEnabled: bool,
@@ -569,7 +580,6 @@ export const RECON_PARAMETER_CATALOG = `
 - stealthMode: boolean - Reduce scan aggressiveness and network noise
 - aiInPipeline: boolean - Master toggle that enables AI-powered enhancements across all recon modules that support them. Cascades on/off to per-tool AI flags (ffufAiExtensions, nucleiAiTags, wafAiClassifier, nucleiAiResponseFilter, takeoverAiClassifier).
 - aiPipelineModel: string - Model identifier for the AI hooks in recon (e.g. "claude-opus-4-6", "claude-haiku-4-5-20251001"). Independent of agentOpenaiModel.
-- updateGraphDb: boolean - Store results in the graph database
 - useBruteforceForSubdomains: boolean - Enable DNS brute-force for subdomain discovery
 
 ## WHOIS & DNS
@@ -779,6 +789,7 @@ export const RECON_PARAMETER_CATALOG = `
 - supplyChainReconEnabled: boolean - Harvest the package set the live target serves (source maps, imports, detected technologies) and verdict it against the OFFLINE OSV database. Writes Package / MalPackageFinding nodes. Fully passive and offline: it re-uses data JS Recon already downloaded and sends NO extra traffic to the target, so it is safe even in stealth/passive presets. Best paired with jsReconEnabled + jsReconSourceMaps (source-map mining is the richest source); without JS Recon it still maps detected technologies to packages.
 - supplyChainReconEcosystems: string - Comma-separated OSV ecosystems to report (default "npm"). Matched EXACTLY against the harvested package ecosystem, so use these names verbatim, case included: npm, PyPI, Go, Maven, crates.io, Packagist, RubyGems, NuGet. Empty string means no filter (report every ecosystem)
 - supplyChainReconDeepAnalysisEnabled: boolean - GuardDog behavioural analysis of flagged packages. Downloads untrusted tarballs, so keep false unless explicitly requested
+- supplyChainTyposquatEnabled: boolean - Flag harvested package names one or two characters away from a popular package without being it. Off by default: near-miss matching produces false positives. The exact-match check against known-bad names always runs and is unaffected by this switch
 
 ## JavaScript Analysis - JS Recon (deep)
 - jsReconEnabled: boolean - Run deep JS analysis
@@ -880,6 +891,7 @@ export const RECON_PARAMETER_CATALOG = `
 - gauBlacklistExtensions: string[] - File extensions to skip, e.g. [".jpg", ".css"]
 - gauVerbose: boolean
 - gauVerifyUrls: boolean - Verify discovered URLs are alive
+- gauVerifyThreads: integer - Concurrent threads used to verify discovered URLs. Only has an effect when gauVerifyUrls is true
 - gauDetectMethods: boolean - Detect allowed HTTP methods
 - gauFilterDeadEndpoints: boolean
 - gauWorkers: integer - Parallel domain query workers
@@ -1068,6 +1080,13 @@ export const RECON_PARAMETER_CATALOG = `
 - originDiscoveryThreshold: integer - Weighted-similarity confidence (0-100) needed to confirm an origin
 - originDiscoveryTimeout: integer - Per-probe HTTP timeout (seconds)
 - originDiscoveryWorkers: integer - Parallel source + validation workers
+
+## Standalone Scanners (separate jobs, not recon pipeline phases)
+These do not run as part of the recon pipeline and are not gated by scanModules. Each is its own scan, started on its own.
+- trufflehogEnabled: boolean - Allow the Secret Multiscanner (TruffleHog) to be run for this project. A master switch on the capability, not something the recon pipeline triggers
+- githubMaxCommits: integer - Commits scanned per repository by the GitHub Secret Hunt. Scales linearly: 100 is the default, 1000 is roughly ten times slower. Only used when commit scanning is on
+- supplyChainDeepAnalysisEnabled: boolean - GuardDog behavioural analysis in the standalone supply-chain scan. Downloads untrusted package tarballs, so keep false unless explicitly requested
+- supplyChainOrgDeepAnalysisEnabled: boolean - The same GuardDog behavioural analysis for an organisation-wide batch, where it is applied to every repository in the batch
 
 ## OSINT & Threat Intelligence
 - osintEnrichmentEnabled: boolean - Master switch for OSINT enrichment

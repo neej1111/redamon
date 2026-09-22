@@ -64,6 +64,14 @@ The tool works well via `kali_shell` / `execute_code`. No dedicated MCP tool or 
 2. `agentic/prompts/tool_registry.py` — Update `kali_shell` entry's `description` field to mention the new tool in the CLI tools list
 3. Rebuild kali-sandbox: `docker compose build kali-sandbox`
 
+> **This is not only the in-app agent's catalogue any more.** The INBOUND MCP
+> server's `kali_toolbox` tool serves `TOOL_REGISTRY["kali_shell"]["description"]`
+> **verbatim** (`agentic/api.py`, `GET /kali/toolbox`), and `kali_exec` is the only
+> way an external agent runs anything at all. A binary you install but leave out of
+> that description does not exist as far as every MCP client is concerned. Nothing
+> tests this, so step 2 is the whole safeguard. Rebuild the **agent** as well as
+> kali-sandbox, since the registry is baked into the agent image.
+
 **Examples:** searchsploit, john, smbclient, sqlmap
 
 ---
@@ -290,6 +298,8 @@ The exact set of files depends on the integration type chosen in Phase 1.
 
 - [ ] **`agentic/prompts/tool_registry.py`** — Add entry to `TOOL_REGISTRY` dict with `purpose`, `when_to_use`, `args_format`, and `description`. Position matters: dict insertion order = tool priority. Read existing entries as reference.
 
+- [ ] **`webapp/src/lib/mcp/schema.ts`** — Add the tool name to `BUILTIN_RESERVED_TOOL_NAMES`. That set stops a user's **outbound MCP Tool Plugin** registering a tool with the same name and shadowing yours at dispatch. **Nothing catches this for you**: the set lives in TypeScript, `TOOL_REGISTRY` lives in Python, and no test compares them across the two languages — the existing test only spot-checks three names. A missed entry is silent until a user's plugin collides.
+
 - [ ] **`agentic/project_settings.py`** — Up to 3 changes:
   1. Add tool to `TOOL_PHASE_MAP` in `DEFAULT_AGENT_SETTINGS` (~line 81-95)
   2. If dangerous: add to `DANGEROUS_TOOLS` frozenset (~line 19-23)
@@ -402,6 +412,11 @@ If the tool has configurable parameters (like Hydra's threads, SQLMap's level/ri
 - [ ] **Frontend section component** — Create `[Tool]Section.tsx` in `webapp/src/components/projects/ProjectForm/sections/` (read `BruteForceSection.tsx` or `SqliSection.tsx` as reference). Export from `sections/index.ts`.
 - [ ] **`webapp/src/components/projects/ProjectForm/ProjectForm.tsx`** — Import and render section in appropriate tab
 - [ ] Run `docker compose exec webapp npx prisma db push`
+- [ ] **`recon_settings/registry.yaml`** — Describe every new `Project` column, then run `python3 recon_settings/build.py`. The build FAILS on an undescribed column, so this layer announces itself.
+  - **`mcp: settable` is the normal answer for an agent setting**, and that is a change from how this used to work. Agent behaviour was denied wholesale as "out of scope for a recon credential"; the result was 63 columns the API could not reach while the form could, which is a capability gap rather than a control. `parity.test.ts` now fails exactly that shape.
+  - Put it in the `agent` group and give it real `bounds` or a `values:` list. The bound is the control, not the classification: a settable field with a fake bound (`0..10000000`) is a fake control on the form input AND the API validator at once, because both are generated from it.
+  - Use `never` only for a column that configures nothing about a run, with a `deny_reason` the schema defines — `escalation` for `mcpKaliExecEnabled`, `secret` for a stored token, `internal` for state the application writes. There is no ALLOW/DENY table and no `agent`, `llm` or `intrusive` deny reason.
+  - The build reads `Prisma.ProjectScalarFieldEnum` from the **generated client**, not `schema.prisma`, so it stays green until the client is regenerated (`docker compose build webapp`, or `prisma generate`). A green local run right after editing the schema does **not** mean you are done.
 
 #### Optional: Attack Skill Integration
 

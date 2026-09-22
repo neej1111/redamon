@@ -66,6 +66,7 @@ import { OtherScansModal } from './components/OtherScansModal/OtherScansModal'
 import { parseScanModal } from '@/lib/scanModalLink'
 import { useAlertModal, useToast } from '@/components/ui'
 import styles from './page.module.css'
+import { deriveRoeEnabled } from '@/lib/engagement'
 
 // A saved (past) version is read-only, and GVM/GitHub-Hunt/TruffleHog write to the
 // LIVE/active graph. Starting one while viewing an old version would silently add
@@ -1474,7 +1475,7 @@ export default function GraphPage() {
         // Stealth mode
         stealthMode={currentProject?.stealthMode}
         // RoE
-        roeEnabled={currentProject?.roeEnabled}
+        engagementLimitsActive={deriveRoeEnabled(currentProject)}
         // Emergency Pause All
         onEmergencyPauseAll={handleEmergencyPauseAll}
         isAnyPipelineRunning={isAnyPipelineRunning}

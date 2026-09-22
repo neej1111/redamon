@@ -10,6 +10,7 @@
  * mirroring its /api/.../start route body exactly.
  */
 import prisma from '@/lib/prisma'
+import { loadEngagement } from '@/lib/engagement'
 import { resolveTrufflehogStart } from '@/lib/trufflehogStart'
 import { orchestratorFetch } from '@/lib/orchestrator'
 import { normalizeOrchestratorStartError } from '@/lib/orchestratorError'
@@ -113,6 +114,26 @@ export async function dispatchStart(
     select: { id: true, userId: true, supplyChainInputMode: true },
   })
   if (!project) return { ok: false, status: 404, error: 'Project not found' }
+
+  // The engagement rule applies to the OTHER scanners too, and it has to be
+  // checked here rather than only in startFullScan: GVM sweeps ports, the
+  // GitHub hunt reads an organization's repositories, and the supply-chain scan
+  // clones one. All three reach somebody else's estate.
+  //
+  // The queue dispatcher and the scheduler both arrive through this function
+  // with nobody watching, which is exactly why the check is server-side: an
+  // agent-facing rule that only applies when an agent is present is not a
+  // control.
+  const engagement = await loadEngagement(projectId)
+  if (engagement.blockers.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        'This is a third-party engagement and it is not startable: ' +
+        engagement.blockers.join(' '),
+    }
+  }
 
   // 'org' is not an input this scan can read: it means "enumerate the account
   // and queue one scan per repo", which is a different kind (supply_chain_repo).

@@ -11,7 +11,10 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 
 const prismaMock = vi.hoisted(() => ({
-  scanVersion: { update: vi.fn(), create: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
+  scanVersion: {
+    update: vi.fn(), create: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(),
+    delete: vi.fn(), findMany: vi.fn(),
+  },
   scanJob: { create: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
   $transaction: vi.fn(),
 }))
@@ -40,6 +43,7 @@ import {
   reconcileScanJobStatus,
   nextVersionSeq,
   rotateToNextVersion,
+  rollbackPreparedVersions,
   SnapshotFreezeError,
 } from './scanTimeline'
 
@@ -354,5 +358,65 @@ describe('reconcileScanJobStatus', () => {
   test('swallows DB errors so a status poll never breaks', async () => {
     prismaMock.scanJob.findFirst.mockRejectedValue(new Error('db down'))
     await expect(reconcileScanJobStatus('p1', 'completed')).resolves.toBeUndefined()
+  })
+})
+
+// P0-2. prepareVersionsForFullScan used to run retention itself, so a start the
+// orchestrator went on to refuse still evicted the oldest saved version. It is
+// now the caller's job, after acceptance, and a refusal is undone here.
+describe('P0-2: rollbackPreparedVersions', () => {
+  const prepared = (frozenVersionId: string | null) => ({
+    currentVersion: { ...CURRENT, id: 'vNew', seq: 3 },
+    frozenVersionId,
+    frozenNodeCount: frozenVersionId ? 120 : 0,
+  })
+
+  test('deletes the minted version and makes the frozen one current again', async () => {
+    const ok = await rollbackPreparedVersions('p1', prepared('vCur'))
+
+    expect(ok).toBe(true)
+    expect(prismaMock.scanVersion.delete).toHaveBeenCalledWith({ where: { id: 'vNew' } })
+    expect(prismaMock.scanVersion.update).toHaveBeenCalledWith({
+      where: { id: 'vCur' },
+      data: { isCurrent: true, snapshot: null },
+    })
+  })
+
+  test('clears the stored snapshot bytes so a retry loop cannot accrete copies', async () => {
+    await rollbackPreparedVersions('p1', prepared('vCur'))
+    const call = prismaMock.scanVersion.update.mock.calls.at(-1)![0] as { data: { snapshot: unknown } }
+    expect(call.data.snapshot).toBeNull()
+  })
+
+  test('runs as ONE transaction, so it cannot leave two current versions', async () => {
+    await rollbackPreparedVersions('p1', prepared('vCur'))
+    expect(prismaMock.$transaction).toHaveBeenCalledOnce()
+  })
+
+  test('is a no-op when nothing was rotated (overwrite, or an empty graph)', async () => {
+    const ok = await rollbackPreparedVersions('p1', prepared(null))
+
+    expect(ok).toBe(false)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.scanVersion.delete).not.toHaveBeenCalled()
+  })
+
+  test('never throws: a start has already failed and must keep its own error', async () => {
+    prismaMock.$transaction.mockRejectedValue(new Error('db down'))
+    await expect(rollbackPreparedVersions('p1', prepared('vCur'))).resolves.toBe(false)
+  })
+})
+
+describe('P0-2: prepare no longer runs retention', () => {
+  test("a 'new' preparation does not touch past versions", async () => {
+    snapshotMock.captureGraphSnapshot.mockResolvedValue({ nodeCount: 5, linkCount: 3, summary: {} })
+    snapshotMock.storeSnapshot.mockResolvedValue({ bytes: 10 })
+    // Retention's first act is to list deletion candidates, so an unused
+    // findMany is the proof that prepare no longer runs it.
+    prismaMock.scanVersion.findMany.mockResolvedValue([])
+
+    await prepareVersionsForFullScan('p1', 'new', 'u1')
+
+    expect(prismaMock.scanVersion.findMany).not.toHaveBeenCalled()
   })
 })

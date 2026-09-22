@@ -455,16 +455,22 @@ class TestSourceIntegrity(unittest.TestCase):
         self.assertIn("URLSCAN_API_KEY", block)
 
     def test_runtime_only_keys_includes_urlscan(self):
-        # Read the whole set literal rather than a fixed byte window: the
-        # assertion is about MEMBERSHIP, and a character count silently starts
-        # failing the moment any key is added ahead of this one.
-        source = (REPO_ROOT / "recon_orchestrator" / "api.py").read_text()
-        idx = source.find("RUNTIME_ONLY_KEYS")
-        self.assertNotEqual(idx, -1)
-        end = source.find("}", idx)
-        self.assertNotEqual(end, -1, "RUNTIME_ONLY_KEYS set is not closed")
-        block = source[idx:end]
-        self.assertIn("'URLSCAN_API_KEY'", block)
+        # The assertion is about MEMBERSHIP, so it evaluates the set rather than
+        # reading it out of the source. The list is DERIVED from the recon
+        # settings registry now; a source grep would have passed on any file
+        # that happened to contain the string, and fails on a file that computes
+        # the same answer a different way.
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "recon"))
+        from settings_registry import runtime_only
+
+        self.assertIn("URLSCAN_API_KEY", runtime_only())
+        entry = runtime_only()["URLSCAN_API_KEY"]
+        # It is a per-user credential fetched at scan time, which is WHY it is
+        # excluded from the project defaults payload.
+        self.assertEqual(entry["source"], "user_account")
+        self.assertTrue(entry.get("secret"))
 
     def test_prisma_schema_has_urlscan_field(self):
         source = (REPO_ROOT / "webapp" / "prisma" / "schema.prisma").read_text()

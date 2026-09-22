@@ -38,7 +38,7 @@ beforeEach(() => {
   mockGetEffectiveUser.mockResolvedValue({ userId: 'owner' })
   db.project.findUnique.mockResolvedValue({
     id: 'p1', userId: 'owner', captureProxyEnabled: true, ipMode: false,
-    targetDomain: 'target.test', subdomainList: [], targetIps: [], roeEnabled: false, roeExcludedHosts: [],
+    targetDomain: 'target.test', subdomainList: [], targetIps: [], roeExcludedHosts: [],
   })
   mockAssertNotActivating.mockResolvedValue(null)
   mockCaptureEnabled.mockResolvedValue(true)

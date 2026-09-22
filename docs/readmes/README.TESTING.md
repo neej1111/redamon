@@ -75,6 +75,32 @@ must be **hermetic or self-skipping**: one that needs a live stack (e.g.
 Smoke/live shell suites are named `*_smoke.sh` / `*_live.sh` and are deliberately
 not matched.
 
+### Two oracles, and only one of them runs in CI
+
+Some unit-tier files mix hermetic checks with checks that need a live Neo4j and
+self-skip without one. The graph-schema suites are the example, and the split is
+deliberate rather than accidental:
+
+| Check | Needs a database | Runs in the gate |
+|---|---|---|
+| every relationship/property the CODE writes is documented (`test_graph_writes_documented.py`) | no | **yes** |
+| every relationship/property in a LIVE graph is documented (`test_schema_catalog.py`) | yes | no, skips |
+
+Both are needed because neither sees everything. The code scan misses the 22
+labels written with `SET n += $props`, where the property names are assembled in
+Python and appear in no file. The live graph misses every feature this
+particular deployment never ran.
+
+So a green gate does NOT mean the live-graph checks passed - it usually means
+they skipped. Run them against a stack before trusting a schema change:
+
+```bash
+NEO4J_PASSWORD="$(grep '^NEO4J_PASSWORD=' .env | cut -d= -f2-)" \
+docker run --rm --network host --entrypoint python3 \
+  -e NEO4J_URI=bolt://localhost:7687 -e NEO4J_USER=neo4j -e NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+  -v "$PWD:/work:ro" -w /work redamon-recon:latest recon/tests/test_schema_catalog.py
+```
+
 A failing file is reported with the command to re-run it on its own:
 
 ```

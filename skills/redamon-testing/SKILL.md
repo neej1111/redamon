@@ -46,6 +46,16 @@ in the root [AGENTS.md](../../AGENTS.md) CRITICAL RULES; this skill is everythin
 - **NEVER `print("SKIP..."); return` to skip a test.** pytest records that as
   **PASSED** while asserting nothing. Use `self.skipTest(...)` inside a
   `TestCase` or `pytest.skip(...)` in a bare function.
+- **NEVER read a green gate as "the live checks passed".** A self-skipping test
+  that needs a service prints SKIP and exits 0, and the gate containers have no
+  Neo4j, so the live-graph schema checks in
+  [recon/tests/test_schema_catalog.py](../../recon/tests/test_schema_catalog.py)
+  SKIP in every CI run. Their hermetic counterparts in
+  [recon/tests/test_graph_writes_documented.py](../../recon/tests/test_graph_writes_documented.py)
+  do run. Neither sees everything: the code scan cannot see the ~22 labels
+  written with `SET n += $props` (the names are built in Python and appear in no
+  file), and the live graph cannot see a feature this deployment never ran. After
+  a schema change, run the live one against a stack before believing it.
 - **NEVER rewrite an assertion so it passes.** If a test reveals a real bug, mark
   it `@pytest.mark.xfail(strict=True, reason=...)` and say so. Tests must not enshrine bugs.
 - **NEVER put a recon test in the root [tests/](../../tests/) folder.** Root

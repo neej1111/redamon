@@ -39,6 +39,63 @@ _WRITE_PROCEDURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Any `CALL` to a procedure NOT on this list is refused.
+#:
+#: This is a positive allowlist because the denylist above could not be made to
+#: work. Tenant scoping rewrites NODE PATTERNS, and a procedure that takes Cypher
+#: as a STRING ARGUMENT carries its query past every pattern-based control:
+#:
+#:     OPTIONAL MATCH (d:Domain) WITH d LIMIT 1
+#:     CALL apoc.cypher.run("MATCH (n) RETURN n.user_id", {}) YIELD value
+#:     RETURN value
+#:
+#: The outer pattern is scoped and the inner string is not even seen - it is a
+#: string literal, so `code_positions()` correctly marks it non-code. The result
+#: is a full cross-tenant read that every guard approves. `apoc.cypher.runMany`
+#: does the same for writes, and `\u0043REATE` inside the literal hides the
+#: keyword from `_WRITE_CLAUSE_RE`, which scans raw text. `apoc.load.json` turns
+#: the same hole into an SSRF from inside the database container.
+#:
+#: APOC ships enabled and unrestricted in this deployment
+#: (docker-compose.yml NEO4J_PLUGINS / procedures_unrestricted), so none of this
+#: is theoretical. No agent or MCP read needs any of it: the legitimate graph
+#: queries are MATCH/RETURN over labelled patterns.
+_ALLOWED_PROCEDURES = frozenset({
+    # The fixed schema op, which is server-controlled and never caller Cypher.
+    "db.schema.visualization",
+    # Read-only index/constraint introspection used by the schema surfaces.
+    "db.labels",
+    "db.relationshiptypes",
+    "db.propertykeys",
+})
+
+_CALL_RE = re.compile(r'\bCALL\s+([A-Za-z_][\w.]*)', re.IGNORECASE)
+
+#: A subquery `CALL { ... }` has no procedure name and is scoped like any other
+#: clause, so it is allowed; only a NAMED procedure call is gated.
+_CALL_SUBQUERY_RE = re.compile(r'\bCALL\s*\{')
+
+
+def find_disallowed_procedure(query: str) -> Optional[str]:
+    """Return the name of the first CALLed procedure that is not allowlisted.
+
+    Only code positions are inspected, so a procedure name appearing inside a
+    string literal is not a false positive.
+    """
+    is_code, _ = code_positions(query)
+    for m in _CALL_RE.finditer(query):
+        # Ignore a match that lies inside a string literal or a comment.
+        if not is_code[m.start()]:
+            continue
+        # `CALL {` subquery: the regex needs a name, so this cannot match, but
+        # guard explicitly in case of `CALL  {`.
+        if _CALL_SUBQUERY_RE.match(query, m.start()):
+            continue
+        name = m.group(1)
+        if name.lower() not in _ALLOWED_PROCEDURES:
+            return name
+    return None
+
 TENANT_PARAMS = {"tenant_user_id", "tenant_project_id"}
 TENANT_PROPS = "user_id: $tenant_user_id, project_id: $tenant_project_id"
 
@@ -614,6 +671,20 @@ def scope_query(cypher: str, user_id: str, project_id: str) -> str:
             f"Query rejected: the '{MUTED_LABEL}' label is reserved and cannot be "
             f"referenced. Findings an operator has suppressed as noise are not "
             f"visible to the agent and cannot be queried."
+        )
+
+    # Checked BEFORE injection, and fail-closed: a procedure that takes Cypher
+    # as a STRING argument (apoc.cypher.run/runMany/runTimeboxed) carries its
+    # query past tenant injection entirely, because injection rewrites node
+    # PATTERNS and the inner query is a string literal. That is a full
+    # cross-tenant read and, via runMany, a cross-tenant WRITE. apoc.load.* is
+    # the same hole pointed outward, as an SSRF from the database container.
+    bad_proc = find_disallowed_procedure(cypher)
+    if bad_proc:
+        raise TenantScopeError(
+            f"Query rejected: the procedure '{bad_proc}' is not permitted. Only "
+            f"MATCH/RETURN over labelled node patterns can be proven scoped to "
+            f"one project; a procedure that takes a query as an argument cannot."
         )
 
     filtered = inject_tenant_filter(cypher, user_id, project_id)

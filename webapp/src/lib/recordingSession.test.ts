@@ -88,7 +88,7 @@ describe('defaultRecordingScope', () => {
   test('domain + subdomains, RoE excluded', () => {
     const scope = defaultRecordingScope({
       targetDomain: 'target.test', subdomainList: ['app.', 'pay.', '.'],
-      roeEnabled: true, roeExcludedHosts: ['pay.target.test'],
+      roeExcludedHosts: ['pay.target.test'],
     })
     expect(scope).toContain('target.test')
     expect(scope).toContain('app.target.test')

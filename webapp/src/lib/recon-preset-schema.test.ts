@@ -5,6 +5,8 @@
 /// <reference types="vite/client" />
 import { describe, test, expect } from 'vitest'
 import { reconPresetSchema, extractJson, RECON_PARAMETER_CATALOG } from './recon-preset-schema'
+import { permittedKeys } from './reconSettings/filter'
+import { field } from './reconSettings/registry'
 
 // ============================================================
 // extractJson
@@ -524,6 +526,71 @@ describe('RECON_PARAMETER_CATALOG', () => {
     }
 
     expect(missing).toEqual([])
+  })
+
+  // `describe_recon_settings` no longer reads this catalog: it serves
+  // `recon_settings/registry.yaml`, which carries a meaning for every one of
+  // the 712 columns rather than prose for 474 of them. This catalog now has one
+  // consumer, the AI preset generator, so the control that matters is the
+  // narrower one: every field the generator may EMIT must be documented for it.
+  test('every field the preset schema accepts is mentioned in the catalog', () => {
+    const missing = Object.keys(reconPresetSchema.shape).filter(
+      key => !new RegExp(`^-\\s+${key}:`, 'm').test(RECON_PARAMETER_CATALOG),
+    )
+    expect(missing).toEqual([])
+  })
+
+  test('every catalog line names a field the schema accepts', () => {
+    // The reverse direction, so a renamed field leaves no orphan prose behind.
+    const named = [...RECON_PARAMETER_CATALOG.matchAll(/^-\s+([A-Za-z0-9_]+):/gm)].map(m => m[1])
+    const known = new Set(Object.keys(reconPresetSchema.shape))
+    expect(named.filter(k => !known.has(k))).toEqual([])
+  })
+
+  test('the MCP reference manual is the registry, not this catalog', () => {
+    // Guards the split: if describe_recon_settings starts reading this file
+    // again there are two answers to "what does this field mean".
+    const settable = permittedKeys('update')
+    expect(settable.length).toBeGreaterThan(600)
+  })
+
+  test('every field the schema accepts is a real column', () => {
+    // The schema STRIPS an unknown key, so a renamed column leaves the
+    // generator emitting a field that is silently discarded: the preset applies
+    // less than it says and reports success.
+    const ghosts = Object.keys(reconPresetSchema.shape).filter(k => !field(k))
+    expect(ghosts, 'the preset schema accepts columns that do not exist').toEqual([])
+  })
+
+  test('every field the schema accepts is one this surface may write', () => {
+    // A generated preset naming a scope column or an RoE field would be refused
+    // at apply time, in front of whoever asked for it.
+    const problems = Object.keys(reconPresetSchema.shape)
+      .map(k => ({ key: k, spec: field(k) }))
+      .filter(({ spec }) => spec && spec.mcp !== 'settable')
+      .map(({ key, spec }) => `${key}: ${spec!.mcp}`)
+    expect(problems).toEqual([])
+  })
+
+  test('the schema accepts the right SHAPE for each field', () => {
+    // Checked by PARSING rather than by reading the declaration: what matters
+    // is what a generated preset can get through, and a mismatch means the
+    // model emits a value the save then rejects with a Prisma type error.
+    const problems: string[] = []
+    for (const [key, schema] of Object.entries(reconPresetSchema.shape)) {
+      const spec = field(key)
+      if (!spec) continue
+      const sample =
+        spec.type === 'boolean' ? true
+        : spec.type === 'int' || spec.type === 'float' ? 1
+        : spec.type === 'string-list' ? ['a']
+        : spec.type === 'number-list' ? [200]
+        : 'x'
+      if (!(schema as { safeParse(v: unknown): { success: boolean } }).safeParse(sample).success) {
+        problems.push(`${key}: a ${spec.type} column rejects ${JSON.stringify(sample)}`)
+      }
+    }
+    expect(problems).toEqual([])
   })
 
   test('all parameter lines have a type annotation', () => {

@@ -93,7 +93,7 @@ class IntegrationBase(unittest.TestCase):
 # Seam 1: governor -> settings dict -> the code that consumes the setting.
 # ---------------------------------------------------------------------------
 class TestThrottleReachesTheMiner(IntegrationBase):
-    """Registering a key in _GOV_BUDGET_KEYS is only half the job. The original
+    """Registering a key as a budget key in the registry is only half the job. The original
     defect was that the miner read os.environ directly, so the governor could
     throttle the setting all day and the miner would never look at it."""
 

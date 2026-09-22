@@ -20,6 +20,7 @@ export const SETTINGS_TABS = {
   tradecraft: 'tradecraft',
   keys: 'keys',
   mcp: 'mcp',
+  mcpTokens: 'mcp-tokens',
   system: 'system',
 } as const
 
@@ -35,3 +36,6 @@ export const SETTINGS_KEYS_HREF = settingsHref(SETTINGS_TABS.keys)
 
 /** Agent Skills - where user-uploaded .md skill files live. */
 export const SETTINGS_SKILLS_HREF = settingsHref(SETTINGS_TABS.skills)
+
+/** MCP Server - the INBOUND credentials other agents connect in with. */
+export const SETTINGS_MCP_TOKENS_HREF = settingsHref(SETTINGS_TABS.mcpTokens)

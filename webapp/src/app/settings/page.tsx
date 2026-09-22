@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { Plus, Pencil, Trash2, Loader2, Eye, EyeOff, Upload, Download, Swords, RotateCw, Copy, Check, ExternalLink, ChevronDown, ChevronRight, Info, BookOpen, Server } from 'lucide-react'
+import { Plus, Pencil, Trash2, Loader2, Eye, EyeOff, Upload, Download, Swords, RotateCw, Copy, Check, ExternalLink, ChevronDown, ChevronRight, Info, BookOpen, Server, KeyRound } from 'lucide-react'
 import { useProject } from '@/providers/ProjectProvider'
 import { useAuth } from '@/providers/AuthProvider'
 import { useVersionCheck } from '@/hooks/useVersionCheck'
@@ -13,6 +13,7 @@ import { githubKeyGroups, trufflehogKeyGroups } from '@/lib/credentialFields'
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard'
 import { LlmProviderForm } from '@/components/settings/LlmProviderForm'
 import McpServersTab from '@/components/settings/mcp/McpServersTab'
+import McpTokensTab from '@/components/settings/mcp-tokens/McpTokensTab'
 import type { ProviderData } from '@/components/settings/LlmProviderForm'
 import { TradecraftResourceForm } from '@/components/settings/TradecraftResourceForm'
 import { TradecraftResourceList } from '@/components/settings/TradecraftResourceList'
@@ -912,7 +913,7 @@ export default function SettingsPage() {
   }, [pendingImport])
 
   const searchParams = useSearchParams()
-  const validTabs = ['providers', 'skills', 'chat-skills', 'tradecraft', 'keys', 'mcp', 'system']
+  const validTabs = ['providers', 'skills', 'chat-skills', 'tradecraft', 'keys', 'mcp', 'mcp-tokens', 'system']
   const initialTab = searchParams.get('tab') || 'providers'
   const [activeTab, setActiveTab] = useState(validTabs.includes(initialTab) ? initialTab : 'providers')
 
@@ -1070,6 +1071,9 @@ export default function SettingsPage() {
         </button>
         <button className={`${styles.tab} ${activeTab === 'mcp' ? styles.tabActive : ''}`} onClick={() => switchTab('mcp')}>
           <Server size={14} /> MCP Tool Plugins
+        </button>
+        <button className={`${styles.tab} ${activeTab === 'mcp-tokens' ? styles.tabActive : ''}`} onClick={() => switchTab('mcp-tokens')}>
+          <KeyRound size={14} /> MCP Server
         </button>
         <button className={`${styles.tab} ${activeTab === 'system' ? styles.tabActive : ''}`} onClick={() => switchTab('system')}>
           <Info size={14} /> System
@@ -1780,6 +1784,7 @@ export default function SettingsPage() {
 
       {/* Tab: System */}
       {activeTab === 'mcp' && userId && <McpServersTab userId={userId} onDirtyChange={setChildDirty} />}
+      {activeTab === 'mcp-tokens' && userId && <McpTokensTab userId={userId} onDirtyChange={setChildDirty} />}
 
       {activeTab === 'system' && (
         <>

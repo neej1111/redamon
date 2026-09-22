@@ -7,7 +7,9 @@
 #  internet-facing security layer (nginx + TLS + firewall + host hardening) that
 #  redamon.sh deliberately does NOT provide (RedAmon is designed local-only).
 #
-#  Public surface reduced to ONE thing: the webapp UI over HTTPS (443). The agent
+#  Public surface reduced to ONE PORT: 443. That serves the webapp UI and, when
+#  MCP_SERVER_ENABLED=true, the credentialed inbound MCP endpoint
+#  (/api/mcp-server) that external AI agents connect to. The agent
 #  API, MCP servers, DBs, orchestrator and reverse-shell catcher stay on loopback.
 #
 #  Config lives in tooling/deploy/single-host/.env (see .env.example). A run is just:
@@ -124,6 +126,20 @@ CERT_BASE="${LEGACY_CERT_DIR:-$SCRIPT_DIR}"
 : "${ENABLE_GVM:=false}"; : "${ENABLE_KB:=false}"; : "${ENABLE_KB_REFRESH:=false}"; : "${ENABLE_ZRAM:=true}"
 : "${SWAP_PCT:=25}"; : "${SWAP_SIZE_GB:=}"; : "${REDAMON_SKIP_RAM_GATE:=false}"; : "${REDAMON_SKIP_DISK_GATE:=false}"; : "${REDAMON_BUILD_PARALLEL:=}"; : "${DOCKER_DNS:=}"; : "${DOCKER_BUILD_CACHE_MAX_GB:=}"
 : "${REVSHELL_TARGET_CIDRS:=}"; : "${TUNNELS_ENABLED:=false}"
+# Inbound MCP server (/api/mcp-server): an external AI agent connects IN with a
+# bearer token and acts as one RedAmon user. OFF by default -- a credentialed
+# programmatic surface must be switched on deliberately, never inherited by an
+# upgrade. MCP_CLIENT_CIDRS is separate from OPERATOR_ALLOW_CIDRS because the
+# firewall cannot filter by URL path: without it, ufw drops an agent's packet
+# before nginx ever sees the exact-match location.
+: "${MCP_SERVER_ENABLED:=false}"; : "${MCP_EDGE_ALLOW_BEARER:=false}"; : "${MCP_CLIENT_CIDRS:=}"
+: "${MCP_TOKEN_RETENTION_DAYS:=}"; : "${MCP_LLM_DAILY_BUDGET:=}"
+: "${MCP_RATE_READ_PER_MIN:=}"; : "${MCP_RATE_QUERY_PER_MIN:=}"; : "${MCP_RATE_WRITE_PER_MIN:=}"
+: "${MCP_RATE_START_PER_WINDOW:=}"; : "${MCP_RATE_START_WINDOW_MS:=}"
+: "${MCP_RATE_COMPARE_PER_WINDOW:=}"; : "${MCP_RATE_COMPARE_WINDOW_MS:=}"
+: "${MCP_KALI_EXEC_ENABLED:=false}"; : "${MCP_RATE_EXEC_PER_MIN:=}"
+: "${MCP_DISABLED_TOOLS:=}"
+: "${MCP_TOKEN_PRUNE_INTERVAL:=}"
 : "${ADMIN_NAME:=}"; : "${ADMIN_EMAIL:=}"; : "${ADMIN_PASSWORD:=}"
 : "${NVD_API_KEY:=}"; : "${KB_EMBEDDING_USE_API:=}"; : "${KB_EMBEDDING_API_BASE_URL:=}"; : "${KB_EMBEDDING_API_KEY:=}"
 # Offline OSV database (supply-chain SCA). Blank -> the app's own defaults
@@ -147,6 +163,16 @@ case "${ACCESS_MODE}" in
 esac
 NEXT_PUBLIC_AGENT_WS_URL="${WS_SCHEME}://${PUBLIC_HOST}/ws/agent"
 AGENT_CORS_ORIGINS="${HTTP_SCHEME}://${PUBLIC_HOST}"
+# The origin a BROWSER would send, port included when non-default. nginx forwards
+# `Host $host`, which drops the port, so the webapp cannot reconstruct this on a
+# non-443/80 deploy and would reject a same-origin client as cross-origin.
+if [[ "${HTTP_SCHEME}" == "https" && "${HTTPS_PORT}" != "443" ]]; then
+  MCP_PUBLIC_ORIGIN="${HTTP_SCHEME}://${PUBLIC_HOST}:${HTTPS_PORT}"
+elif [[ "${HTTP_SCHEME}" == "http" && "${HTTP_PORT}" != "80" ]]; then
+  MCP_PUBLIC_ORIGIN="${HTTP_SCHEME}://${PUBLIC_HOST}:${HTTP_PORT}"
+else
+  MCP_PUBLIC_ORIGIN="${HTTP_SCHEME}://${PUBLIC_HOST}"
+fi
 CSP_CONNECT="${WS_SCHEME}://${PUBLIC_HOST}"
 WEBAPP_NODE_ENV="production"
 NEED_CERTBOT=false; [[ "${TLS_MODE}" == "letsencrypt" ]] && NEED_CERTBOT=true
@@ -186,6 +212,27 @@ preflight_validate() {
 
   if [[ "${GATE_MODE}" == "basic_auth" ]]; then
     [[ -n "${BASIC_AUTH_USER}" && -n "${BASIC_AUTH_PASS}" ]] || die "GATE_MODE=basic_auth requires BASIC_AUTH_USER/BASIC_AUTH_PASS"
+  fi
+
+  if is_true "${MCP_SERVER_ENABLED}"; then
+    # REFUSED, not warned: the whole credential is a bearer token in a header.
+    # Over http-* it crosses the wire in plaintext on every single call, and the
+    # token outlives the session, so one capture is a durable credential.
+    # ALLOW_INSECURE covers "my cookies are plaintext"; it does not cover
+    # "I am broadcasting a long-lived API credential".
+    [[ "${ACCESS_MODE}" == http-* ]] && die "MCP_SERVER_ENABLED=true is refused in ${ACCESS_MODE}: a bearer token would travel in plaintext on every call. Use an https-* ACCESS_MODE."
+
+    if [[ "${GATE_MODE}" == "basic_auth" ]] && ! is_true "${MCP_EDGE_ALLOW_BEARER}"; then
+      warn "MCP is enabled but GATE_MODE=basic_auth consumes the Authorization header: /api/mcp-server will return 403. Set MCP_EDGE_ALLOW_BEARER=true to open it."
+    fi
+    # The firewall gates the port before nginx ever sees the path, so an agent
+    # outside both CIDR lists is dropped no matter what the location says.
+    if [[ -n "${OPERATOR_ALLOW_CIDRS}" && -z "${MCP_CLIENT_CIDRS}" ]]; then
+      warn "MCP is enabled and the firewall scopes the app port to OPERATOR_ALLOW_CIDRS. An agent outside those CIDRs is blocked BEFORE nginx. Set MCP_CLIENT_CIDRS to admit it."
+    fi
+    if [[ "${ACCESS_MODE}" == "https-ip" && "${TLS_MODE}" != "provided" ]]; then
+      warn "MCP over https-ip with a self-signed cert: most MCP clients reject the certificate. Use a real cert (TLS_MODE=provided) or a domain."
+    fi
   fi
   [[ -z "${OPERATOR_ALLOW_CIDRS}" && "${GATE_MODE}" == "ip_allowlist" ]] && warn "GATE_MODE=ip_allowlist but OPERATOR_ALLOW_CIDRS is empty -> the nginx gate will allow all"
 
@@ -320,6 +367,14 @@ build_deploy_env() {
              OS_RESERVE_PCT SERVICES_PCT BURST_FACTOR BURST_SWAP_MIN_PCT BLAST_PCT DISK_RESERVE_PCT \
              REDAMON_WEIGHT_WEBAPP REDAMON_WEIGHT_NEO4J REDAMON_WEIGHT_AGENT \
              REVSHELL_TARGET_CIDRS TUNNELS_ENABLED \
+             MCP_SERVER_ENABLED MCP_EDGE_ALLOW_BEARER MCP_CLIENT_CIDRS \
+             MCP_TOKEN_RETENTION_DAYS MCP_LLM_DAILY_BUDGET \
+             MCP_RATE_READ_PER_MIN MCP_RATE_QUERY_PER_MIN MCP_RATE_WRITE_PER_MIN \
+             MCP_RATE_START_PER_WINDOW MCP_RATE_START_WINDOW_MS MCP_TOKEN_PRUNE_INTERVAL \
+             MCP_RATE_COMPARE_PER_WINDOW MCP_RATE_COMPARE_WINDOW_MS \
+             MCP_KALI_EXEC_ENABLED MCP_RATE_EXEC_PER_MIN \
+             MCP_DISABLED_TOOLS \
+             MCP_PUBLIC_ORIGIN \
              ADMIN_NAME ADMIN_EMAIL ADMIN_PASSWORD \
              NVD_API_KEY KB_EMBEDDING_USE_API KB_EMBEDDING_API_BASE_URL KB_EMBEDDING_API_KEY \
              OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS OSV_DB_TTL_SECONDS OSV_DB_REFRESH_TIMEOUT \
@@ -462,6 +517,33 @@ seed SCA_INTEL_REFRESH_TIMEOUT "\${SCA_INTEL_REFRESH_TIMEOUT}"
 seed SCA_INTEL_BOOTSTRAP_ON_SCAN "\${SCA_INTEL_BOOTSTRAP_ON_SCAN}"
 seed SCA_INTEL_MATCH_ENABLED "\${SCA_INTEL_MATCH_ENABLED}"
 seed CAPTURE_IOC_IGNORE_SUFFIXES "\${CAPTURE_IOC_IGNORE_SUFFIXES}"
+# Inbound MCP server. Seeded BEFORE redamon.sh runs: ensure_auth_secrets appends
+# MCP_SERVER_ENABLED=false when the key is ABSENT, so without this the deployed
+# host actively pins the flag off and the operator's choice is unreachable.
+# seed() overwrites an existing key, so re-running is idempotent either way.
+seed MCP_SERVER_ENABLED "\${MCP_SERVER_ENABLED}"
+seed MCP_TOKEN_RETENTION_DAYS "\${MCP_TOKEN_RETENTION_DAYS}"
+seed MCP_LLM_DAILY_BUDGET "\${MCP_LLM_DAILY_BUDGET}"
+seed MCP_RATE_READ_PER_MIN "\${MCP_RATE_READ_PER_MIN}"
+seed MCP_RATE_QUERY_PER_MIN "\${MCP_RATE_QUERY_PER_MIN}"
+seed MCP_RATE_WRITE_PER_MIN "\${MCP_RATE_WRITE_PER_MIN}"
+seed MCP_RATE_START_PER_WINDOW "\${MCP_RATE_START_PER_WINDOW}"
+seed MCP_RATE_START_WINDOW_MS "\${MCP_RATE_START_WINDOW_MS}"
+seed MCP_RATE_COMPARE_PER_WINDOW "\${MCP_RATE_COMPARE_PER_WINDOW}"
+seed MCP_RATE_COMPARE_WINDOW_MS "\${MCP_RATE_COMPARE_WINDOW_MS}"
+seed MCP_KALI_EXEC_ENABLED "\${MCP_KALI_EXEC_ENABLED}"
+seed MCP_RATE_EXEC_PER_MIN "\${MCP_RATE_EXEC_PER_MIN}"
+seed MCP_DISABLED_TOOLS "\${MCP_DISABLED_TOOLS}"
+seed MCP_TOKEN_PRUNE_INTERVAL "\${MCP_TOKEN_PRUNE_INTERVAL}"
+# The webapp validates the request Origin against its own URL, which nginx
+# builds from \`proxy_set_header Host \$host\` -- and \$host DROPS THE PORT. On a
+# non-default HTTPS_PORT an Origin-sending client would be 403'd against its own
+# origin, so the public origin is passed explicitly.
+seed MCP_ALLOWED_ORIGIN "\${MCP_PUBLIC_ORIGIN}"
+# Behind nginx every request arrives from 127.0.0.1 unless the app is told the
+# edge is trusted. nginx pins X-Forwarded-For to the real peer, so this is safe
+# here and is what makes audit records and the login lockout name a real IP.
+seed TRUST_PROXY "true"
 
 # Memory-governor SHARES. Percentages only: redamon.sh computes the actual sizes
 # from the remote host's own RAM, so the same values are correct on an 8GB and a
@@ -591,7 +673,7 @@ setup_nginx_tls() {
 ${PREAMBLE}
 source modules/nginx.sh
 source modules/tls.sh
-export SERVER_NAME CSP_CONNECT ACCESS_MODE TLS_MODE GATE_MODE OPERATOR_ALLOW_CIDRS BASIC_AUTH_USER BASIC_AUTH_PASS HSTS_ENABLE DOMAIN HOST_IP LETSENCRYPT_EMAIL LETSENCRYPT_STAGING SSL_KEY_PASSWORD WS_REQUIRE_SESSION CSP_ENFORCE HTTP_PORT HTTPS_PORT
+export SERVER_NAME CSP_CONNECT ACCESS_MODE TLS_MODE GATE_MODE OPERATOR_ALLOW_CIDRS BASIC_AUTH_USER BASIC_AUTH_PASS HSTS_ENABLE DOMAIN HOST_IP LETSENCRYPT_EMAIL LETSENCRYPT_STAGING SSL_KEY_PASSWORD WS_REQUIRE_SESSION CSP_ENFORCE HTTP_PORT HTTPS_PORT MCP_SERVER_ENABLED MCP_EDGE_ALLOW_BEARER MCP_CLIENT_CIDRS
 case "\${ACCESS_MODE}" in
   https-*)
     if [ "\${TLS_MODE}" = "letsencrypt" ]; then
@@ -725,6 +807,50 @@ EOF
     local code; code=$(curl -m 15 -sS -o /dev/null -w '%{http_code}' "http://${PUBLIC_HOST}/api/health" 2>/dev/null || echo "000")
     [[ "${code}" == "200" ]] && ok "http://${PUBLIC_HOST}/api/health -> 200" || warn "health check -> ${code}"
   fi
+
+  # Inbound MCP surface. Cheap to probe unauthenticated because the route
+  # answers with DISTINGUISHABLE codes, which is what lets this tell the four
+  # silent failure modes apart instead of lumping them into "inert endpoint":
+  #   404 = disabled (flag off, or the flag never reached the container)
+  #   401 = enabled, credential required  <- the working state
+  #   403 = the basic_auth gate ate the Authorization header
+  #   200 = enabled with NO credential required, which must never happen
+  local base="${HTTP_SCHEME}://${PUBLIC_HOST}"
+  local mcp; mcp=$(curl -m 15 -skS -o /dev/null -w '%{http_code}' \
+      -X POST "${base}/api/mcp-server" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' 2>/dev/null || echo "000")
+  if is_true "${MCP_SERVER_ENABLED}"; then
+    case "${mcp}" in
+      401) ok "MCP /api/mcp-server -> 401 (enabled, credential required)" ;;
+      403) err "MCP -> 403: the edge gate is eating the Authorization header. Set MCP_EDGE_ALLOW_BEARER=true (GATE_MODE=${GATE_MODE})"; ;;
+      404) err "MCP -> 404 but MCP_SERVER_ENABLED=true: the flag did not reach the webapp container (seed/plumbing)" ;;
+      200) err "MCP -> 200 WITHOUT a token: the endpoint is answering unauthenticated. Stop and investigate." ;;
+      000) warn "MCP probe could not connect (firewall/allowlist may be excluding this machine)" ;;
+      *)   warn "MCP -> ${mcp} (unexpected)" ;;
+    esac
+  else
+    [[ "${mcp}" == "404" ]] && ok "MCP disabled -> 404 (as configured)" \
+      || warn "MCP is disabled but /api/mcp-server -> ${mcp} (expected 404)"
+  fi
+
+  # Stateless mode has no stream to manage, so GET must be refused.
+  local mget; mget=$(curl -m 15 -skS -o /dev/null -w '%{http_code}' "${base}/api/mcp-server" 2>/dev/null || echo "000")
+  if is_true "${MCP_SERVER_ENABLED}"; then
+    [[ "${mget}" == "405" ]] && ok "MCP GET -> 405" || warn "MCP GET -> ${mget} (expected 405)"
+  fi
+
+  # Regression guard for the path collision: /api/mcp/* is the OUTBOUND plugin
+  # admin namespace and must still require a session. A PUBLIC_PATHS entry of
+  # '/api/mcp' would have made all three public, since the middleware matches
+  # on startsWith(p + '/').
+  local adm; adm=$(curl -m 15 -skS -o /dev/null -w '%{http_code}' "${base}/api/mcp/manifest" 2>/dev/null || echo "000")
+  case "${adm}" in
+    401|403) ok "/api/mcp/manifest -> ${adm} (outbound admin still gated)" ;;
+    200) err "/api/mcp/manifest -> 200 UNAUTHENTICATED: the outbound MCP admin namespace is exposed" ;;
+    *) warn "/api/mcp/manifest -> ${adm}" ;;
+  esac
 }
 
 # ============================================================================
@@ -749,8 +875,43 @@ is_true "\${ENABLE_ZRAM}" && export REDAMON_ENABLE_ZRAM=1
 # ship the wrong ws://localhost:8090 WS URL (the chat "Connecting..." bug).
 # Preserve the version stamp so the overlay build-arg doesn't default to 0.0.0.
 [ -z "\${REDAMON_VERSION:-}" ] && [ -f VERSION ] && export REDAMON_VERSION="\$(cat VERSION 2>/dev/null || echo)"
+step "Re-seed application .env (operator app-config; init-only before, so update ignored it)"
+touch .env
+seed() { local k="\$1" v="\$2"; [ -z "\$v" ] && return 0; grep -q "^\$k=" .env && sed -i "s|^\$k=.*|\$k=\$v|" .env || echo "\$k=\$v" >> .env; }
+# Inbound MCP server. Seeded BEFORE redamon.sh runs: ensure_auth_secrets appends
+# MCP_SERVER_ENABLED=false when the key is ABSENT, so without this the deployed
+# host actively pins the flag off and the operator's choice is unreachable.
+# seed() overwrites an existing key, so re-running is idempotent either way.
+seed MCP_SERVER_ENABLED "\${MCP_SERVER_ENABLED}"
+seed MCP_TOKEN_RETENTION_DAYS "\${MCP_TOKEN_RETENTION_DAYS}"
+seed MCP_LLM_DAILY_BUDGET "\${MCP_LLM_DAILY_BUDGET}"
+seed MCP_RATE_READ_PER_MIN "\${MCP_RATE_READ_PER_MIN}"
+seed MCP_RATE_QUERY_PER_MIN "\${MCP_RATE_QUERY_PER_MIN}"
+seed MCP_RATE_WRITE_PER_MIN "\${MCP_RATE_WRITE_PER_MIN}"
+seed MCP_RATE_START_PER_WINDOW "\${MCP_RATE_START_PER_WINDOW}"
+seed MCP_RATE_START_WINDOW_MS "\${MCP_RATE_START_WINDOW_MS}"
+seed MCP_RATE_COMPARE_PER_WINDOW "\${MCP_RATE_COMPARE_PER_WINDOW}"
+seed MCP_RATE_COMPARE_WINDOW_MS "\${MCP_RATE_COMPARE_WINDOW_MS}"
+seed MCP_KALI_EXEC_ENABLED "\${MCP_KALI_EXEC_ENABLED}"
+seed MCP_RATE_EXEC_PER_MIN "\${MCP_RATE_EXEC_PER_MIN}"
+seed MCP_DISABLED_TOOLS "\${MCP_DISABLED_TOOLS}"
+seed MCP_TOKEN_PRUNE_INTERVAL "\${MCP_TOKEN_PRUNE_INTERVAL}"
+# The webapp validates the request Origin against its own URL, which nginx
+# builds from \`proxy_set_header Host \$host\` -- and \$host DROPS THE PORT. On a
+# non-default HTTPS_PORT an Origin-sending client would be 403'd against its own
+# origin, so the public origin is passed explicitly.
+seed MCP_ALLOWED_ORIGIN "\${MCP_PUBLIC_ORIGIN}"
+# Behind nginx every request arrives from 127.0.0.1 unless the app is told the
+# edge is trusted. nginx pins X-Forwarded-For to the real peer, so this is safe
+# here and is what makes audit records and the login lockout name a real IP.
+seed TRUST_PROXY "true"
+
 step "redamon.sh update (git pull --ff-only + diff-driven rebuild + secret regen)"
 sg docker -c "cd \$APP_PATH && ./redamon.sh update"
+# redamon.sh rebuilds only what CHANGED. An .env-only edit changes no image, so
+# the webapp would keep running with its old environment; recreate it explicitly.
+step "Recreate webapp so a changed .env actually takes effect"
+sg docker -c "cd \$APP_PATH && docker compose -f docker-compose.yml -f \$OVERLAY_DIR/docker-compose.prod.yml up -d webapp"
 EOF
   run_secrets_gate
   # nginx may have changed; re-render is idempotent + gated
@@ -902,6 +1063,7 @@ main() {
 MODE=${MODE}  HOST=${HOST_IP}:${SSH_PORT}  USER=${REMOTE_USER}
 ACCESS_MODE=${ACCESS_MODE}  TLS_MODE=${TLS_MODE}  PUBLIC_HOST=${PUBLIC_HOST}
 WS=${NEXT_PUBLIC_AGENT_WS_URL}  CORS=${AGENT_CORS_ORIGINS}  gate=${GATE_MODE}
+MCP=${MCP_SERVER_ENABLED}  mcp_edge_bearer=${MCP_EDGE_ALLOW_BEARER}  mcp_cidrs=${MCP_CLIENT_CIDRS:-<none>}  origin=${MCP_PUBLIC_ORIGIN}
 flags: GVM=${ENABLE_GVM} KB=${ENABLE_KB} ZRAM=${ENABLE_ZRAM} ufw=${ENABLE_UFW}
 PLAN
     exit 0
@@ -919,4 +1081,9 @@ PLAN
     revshell-close) cmd_revshell_close ;;
   esac
 }
-main
+# Run main only when EXECUTED, never when SOURCED. Sourcing is how
+# tests/deploy_mcp_env_chain_test.sh exercises build_deploy_env and the
+# ACCESS_MODE derivations for real, without needing an SSH host.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main
+fi

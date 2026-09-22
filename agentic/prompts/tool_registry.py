@@ -75,19 +75,78 @@ TOOL_REGISTRY = {
             '     if "rdmn<svg/onload=1>" in r.body: redamon.finding("xss", t.id, evidence=r, severity="high")'
         ),
     },
+    # The three graph tools are ONE capability with three verbs, and they are
+    # described as such. The node labels are deliberately NOT listed here any
+    # more: a second copy of the schema in a prompt is exactly what drifts out
+    # of date, and graph_schema serves the real thing from the same text the
+    # Cypher generator is prompted with.
     "query_graph": {
         "purpose": "Neo4j database queries",
         "when_to_use": "PRIMARY - Check graph first for recon data",
         "args_format": '"question": "natural language question about the graph data"',
         "description": (
             '**query_graph** (PRIMARY — start here)\n'
-            '   - Query Neo4j graph via natural language — your source of truth for recon data\n'
-            '   - **Nodes:** Domains, Subdomains, IPs, Ports, Services, BaseURLs, DNSRecords, '
-            'Endpoints, Parameters, Certificates, Headers, Technologies, Vulnerabilities, '
-            'CVEs, MitreData (CWE), CAPEC, Traceroute hops, Exploits, ExploitGvm, '
-            'GithubHunt, Repositories, Paths, Secrets, SensitiveFiles, '
-            'JsReconFinding, MultiscannerScan, MultiscannerRepository, MultiscannerFinding\n'
+            '   - Ask the attack-surface graph a question in natural language. It is your '
+            'source of truth for recon data, and it handles the schema for you.\n'
+            '   - Read-only and scoped to this project.\n'
+            '   - Two companions, same capability: **graph_summary** tells you what this '
+            'project actually contains, **graph_schema** tells you what the graph means.\n'
+            '   - Use graph_summary first, as a general rule: it tells you what this project '
+            'actually contains.\n'
+            '   - Use query_graph to ask real questions in natural language. This is the '
+            'default and it handles the schema for you.\n'
+            '   - Use graph_schema when you need a deeper understanding of the graph, '
+            'including what things mean: a natural-language query did not work as expected, '
+            'or returned nothing or something surprising, and graph_summary was not enough '
+            'to explain why.\n'
             '   - Skip if you already know which specific tool to use'
+        ),
+    },
+    "graph_summary": {
+        "purpose": "What this project's graph actually contains",
+        "when_to_use": "Orient before concluding something is absent; after an empty query",
+        "args_format": 'no arguments',
+        "description": (
+            '**graph_summary** (orient)\n'
+            '   - A count per node type, plus the relationships present. Counts only, never '
+            'sample values. No arguments.\n'
+            '   - Read this BEFORE concluding that something is absent. If a node type is '
+            'missing entirely, that surface was never scanned — which is a very different '
+            'answer from "it was scanned and is clean". Reporting the first as the second is '
+            'a false negative, and this tool is how you avoid it.\n'
+            '   - Use graph_summary first, as a general rule: it tells you what this project '
+            'actually contains.\n'
+            '   - Use query_graph to ask real questions in natural language. This is the '
+            'default and it handles the schema for you.\n'
+            '   - Use graph_schema when you need a deeper understanding of the graph, '
+            'including what things mean: a natural-language query did not work as expected, '
+            'or returned nothing or something surprising, and graph_summary was not enough '
+            'to explain why.'
+        ),
+    },
+    "graph_schema": {
+        "purpose": "What the graph MEANS: node types, properties, relationships",
+        "when_to_use": "A query came back wrong or empty and graph_summary did not explain why",
+        "args_format": 'no arguments',
+        "description": (
+            '**graph_schema** (understand)\n'
+            '   - The graph schema INCLUDING its semantics: what each node type means, what '
+            'its properties mean and which values they take, which relationships connect what '
+            'and in which direction, and the distinctions that are easy to get wrong (for '
+            'example, Vulnerability and CVE are two different node types). No arguments.\n'
+            '   - Reads no data, so it still works when a query does not.\n'
+            '   - Reach for it when a query returned nothing or something surprising and you '
+            'suspect the QUESTION was framed wrong rather than the data being missing. A '
+            'mechanical failure recovers on its own; a mis-framed question does not, and it '
+            'reads as an authoritative empty answer.\n'
+            '   - Use graph_summary first, as a general rule: it tells you what this project '
+            'actually contains.\n'
+            '   - Use query_graph to ask real questions in natural language. This is the '
+            'default and it handles the schema for you.\n'
+            '   - Use graph_schema when you need a deeper understanding of the graph, '
+            'including what things mean: a natural-language query did not work as expected, '
+            'or returned nothing or something surprising, and graph_summary was not enough '
+            'to explain why.'
         ),
     },
     "web_search": {

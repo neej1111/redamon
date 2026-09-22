@@ -1,7 +1,7 @@
 'use client'
 
 import type { MouseEvent } from 'react'
-import { BookOpen } from 'lucide-react'
+import { BookOpen, type LucideIcon } from 'lucide-react'
 import { getWikiUrl } from './wiki-links'
 import styles from './WikiInfoButton.module.css'
 
@@ -18,6 +18,8 @@ interface WikiInfoButtonProps {
   className?: string
   /** Stop click propagation so collapsible section headers don't toggle. */
   stopPropagation?: boolean
+  /** Swap the book icon when a section links more than one kind of page (e.g. an API reference). */
+  icon?: LucideIcon
 }
 
 export function WikiInfoButton({
@@ -27,6 +29,7 @@ export function WikiInfoButton({
   size = 13,
   className,
   stopPropagation = true,
+  icon: Icon = BookOpen,
 }: WikiInfoButtonProps) {
   const href = target.startsWith('http') ? target : getWikiUrl(target)
   if (!href) return null
@@ -49,7 +52,7 @@ export function WikiInfoButton({
       aria-label={title}
       onClick={handleClick}
     >
-      <BookOpen size={size} />
+      <Icon size={size} />
       {label && <span className={styles.label}>{label}</span>}
     </a>
   )

@@ -17,7 +17,6 @@
  */
 import prisma from '@/lib/prisma'
 import { writeAudit } from '@/lib/audit'
-import { applyRetentionSafe } from '@/lib/scanRetention'
 import {
   captureGraphSnapshot,
   storeSnapshot,
@@ -116,13 +115,55 @@ export async function prepareVersionsForFullScan(
 
   const created = await rotateToNextVersion(projectId, current.id)
 
-  // A version was just added to the timeline - trim it back to the policy.
-  await applyRetentionSafe(projectId)
-
+  // Retention is deliberately NOT run here. It deletes the oldest unpinned
+  // versions, and a start the orchestrator goes on to refuse must not cost the
+  // user a saved version. `startFullScan` calls applyRetentionSafe only after
+  // the start is accepted (mcp_plan.md P0-2).
   return {
     currentVersion: created,
     frozenVersionId: current.id,
     frozenNodeCount: captured.nodeCount,
+  }
+}
+
+/**
+ * Undo `prepareVersionsForFullScan` after a start the orchestrator refused.
+ *
+ * Only meaningful for `mode: 'new'` that actually rotated (`frozenVersionId`
+ * set). The live graph is never touched by the freeze, so deleting the empty
+ * new version and making the frozen one current again returns the timeline to
+ * its prior state. Without this, an external agent retrying a 403 in a loop
+ * mints a version and stores a duplicate snapshot on every attempt.
+ *
+ * Never throws: a start has already failed, and failing to tidy up must not
+ * replace that error with a less useful one.
+ */
+export async function rollbackPreparedVersions(
+  projectId: string,
+  prepared: PrepareResult
+): Promise<boolean> {
+  const frozenId = prepared.frozenVersionId
+  if (!frozenId) return false
+
+  try {
+    await prisma.$transaction(async tx => {
+      await tx.scanVersion.delete({ where: { id: prepared.currentVersion.id } })
+      await tx.scanVersion.update({
+        where: { id: frozenId },
+        // nodeCount/linkCount are left as the freeze measured them: the live
+        // graph was never touched, so those numbers describe it accurately.
+        // Only the snapshot bytes (and the demotion) are undone.
+        data: { isCurrent: true, snapshot: null },
+      })
+    })
+    return true
+  } catch (err) {
+    console.error(
+      `[scanTimeline] could not roll back the prepared version for project ${projectId} ` +
+      '(the timeline keeps an extra empty version):',
+      err
+    )
+    return false
   }
 }
 
@@ -197,6 +238,10 @@ export interface CreateScanJobInput {
   kind?: string
   /** Only for kinds that run several times per project at once. */
   runId?: string
+  /** The sha256 of the scan-steering settings this run started with. */
+  settingsHash?: string | null
+  /** Which authorization permitted it, from the project's current record. */
+  authorizationId?: string | null
 }
 
 export async function createScanJob(input: CreateScanJobInput): Promise<{ id: string }> {
@@ -213,6 +258,8 @@ export async function createScanJob(input: CreateScanJobInput): Promise<{ id: st
       initiatedByUserId: input.initiatedByUserId ?? null,
       scheduleId: input.scheduleId ?? null,
       ramReason: input.ramReason ?? null,
+      settingsHash: input.settingsHash ?? null,
+      authorizationId: input.authorizationId ?? null,
       startedAt: status === 'running' ? new Date() : null,
     },
     select: { id: true },

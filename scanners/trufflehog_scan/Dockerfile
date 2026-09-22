@@ -22,11 +22,18 @@ WORKDIR /app
 # and download the release tarball directly; the release page publishes
 # trufflehog_<version>_checksums.txt, which is verified before extraction.
 ARG TRUFFLEHOG_VERSION=3.96.0
+# Set by BuildKit to the image's architecture (arm64 on Apple Silicon / ARM
+# hosts). The checksums file lists every architecture, so a hardcoded amd64
+# asset verifies fine on arm64 and only dies at the `--version` smoke test with
+# "Exec format error". dpkg covers the legacy builder, which leaves it unset.
+ARG TARGETARCH
 
 # git is required by TruffleHog for repo scanning.
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates git && \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    case "$arch" in amd64|arm64) ;; *) echo "unsupported architecture: $arch" >&2; exit 1 ;; esac && \
     base="https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}" && \
-    asset="trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" && \
+    asset="trufflehog_${TRUFFLEHOG_VERSION}_linux_${arch}.tar.gz" && \
     curl -sSfL -o "/tmp/${asset}" "${base}/${asset}" && \
     curl -sSfL -o /tmp/checksums.txt "${base}/trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt" && \
     (cd /tmp && grep " ${asset}\$" checksums.txt | sha256sum -c -) && \

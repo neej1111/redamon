@@ -1,0 +1,177 @@
+/**
+ * P8: no shipped agent-facing string names a tool that is not on the surface.
+ *
+ * `playbook.ts` is the one that makes this worth a test rather than a habit. It
+ * is read by the connected agent AT RUN TIME, so a line still saying "call
+ * `tighten_engagement_roe`" does not produce a stale doc, it sends an agent
+ * after something that answers "unknown tool" - and an unattended agent's reply
+ * to an opaque failure is usually another attempt.
+ *
+ * The same failure has a quieter form in `onboarding.ts` and `scopeCopy.ts`:
+ * those are written into the onboarding pack and the token-permission UI, so a
+ * deleted tool named there teaches a person a capability that does not exist.
+ *
+ * Deliberately crude, and checked against the LIVE `tools/list` rather than a
+ * list of names, because a list of names is the thing that goes stale.
+ *
+ * @vitest-environment node
+ */
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+
+import { describe, test, expect, beforeAll, vi } from 'vitest'
+
+vi.mock('@/lib/prisma', () => ({ default: {} }))
+vi.mock('@/lib/audit', () => ({ writeAudit: vi.fn() }))
+
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
+
+import { buildMcpServer } from './server'
+import type { McpContext } from './tools'
+
+const ctx: McpContext = {
+  token: {
+    tokenId: 't1', userId: 'owner', tokenPrefix: 'rdmn_mcp_aaaaaaaa',
+    name: 'drift', scopes: ['recon:read'] as never,
+  },
+}
+
+let live: Set<string>
+
+beforeAll(async () => {
+  const server = buildMcpServer(ctx)
+  const client = new Client({ name: 'drift-test', version: '1.0.0' }, { capabilities: {} })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  try {
+    const result = await client.request({ method: 'tools/list' }, ListToolsResultSchema)
+    live = new Set(result.tools.map(t => t.name))
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+/** Files whose strings reach an agent or a person at run time. */
+const AGENT_FACING = [
+  'playbook.ts',
+  'onboarding.ts',
+  'scopeCopy.ts',
+  'catalogTools.ts',
+  'instructions.ts',
+  'writeTools.ts',
+  'engagementTools.ts',
+]
+
+/**
+ * Anything shaped like one of our tool names.
+ *
+ * Two words or more in snake_case, starting with a verb-ish token we actually
+ * use. Deliberately narrow: matching every snake_case identifier would flag
+ * Python settings keys and SQL columns, and a test that cries wolf is one
+ * people switch off.
+ */
+const TOOL_SHAPED = /\b((?:get|list|start|stop|update|create|query|run|set|cancel|queue|compare|describe|attach|preflight|tighten|kali|graph)_[a-z][a-z0-9_]{2,})\b/g
+
+/**
+ * Comments are stripped, deliberately.
+ *
+ * A comment explaining that a tool was DELETED is the correction, not the
+ * defect, and flagging it would teach people to remove the explanation rather
+ * than the stale instruction. What reaches an agent is the string literals.
+ */
+function stripComments(text: string): string {
+  return text
+    .split('\n')
+    .map(line => (/^\s*(\/\/|\*|\/\*)/.test(line) ? '' : line))
+    .join('\n')
+}
+
+function namedIn(file: string): Map<string, number[]> {
+  const raw = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
+  const found = new Map<string, number[]>()
+  for (const [i, line] of stripComments(raw).split('\n').entries()) {
+    for (const m of line.matchAll(TOOL_SHAPED)) {
+      const name = m[1]
+      // An audit action, not a tool: `mcp.attach_authorization`.
+      if (line.includes(`mcp.${name}`)) continue
+      found.set(name, [...(found.get(name) ?? []), i + 1])
+    }
+  }
+  return found
+}
+
+/**
+ * Snake_case identifiers that are not tools and never were.
+ *
+ * Named individually rather than skipped by a pattern, so a NEW name that is
+ * not a tool still has to be looked at once.
+ */
+const NOT_TOOLS = new Set([
+  // Registry dispositions, which share the shape by coincidence.
+  'create_only',
+  // Outcome codes on an audit row, never spoken to an agent.
+  'start_outcome_unknown', 'start_refused_', 'stop_failed',
+  // Audit actions written without the `mcp.` prefix on their own line.
+  'attach_authorization',
+])
+
+describe('P8: every tool named in an agent-facing string exists', () => {
+  test('the live surface was actually read', () => {
+    expect(live.size).toBeGreaterThan(20)
+    expect(live.has('query_graph')).toBe(true)
+  })
+
+  test.each(AGENT_FACING)('%s names no tool that tools/list does not have', file => {
+    const problems: string[] = []
+    for (const [name, lines] of namedIn(file)) {
+      if (live.has(name) || NOT_TOOLS.has(name)) continue
+      problems.push(`${file}:${lines.join(',')}: '${name}'`)
+    }
+    expect(problems).toEqual([])
+  })
+
+  test('the deleted tool is named nowhere agent-facing', () => {
+    // Named explicitly as well as caught by the sweep above, because this is
+    // the one the sweep was written for: `playbook.ts` instructed the agent to
+    // call it, and `tools.ts` routed the call.
+    for (const file of AGENT_FACING) {
+      expect(namedIn(file).has('tighten_engagement_roe'), file).toBe(false)
+    }
+  })
+
+  test('no agent-facing string still claims a one-way rule', () => {
+    // The tool-name sweep above would NOT have caught this, and did not: the
+    // onboarding pack told an agent "you can never loosen the rules of
+    // engagement... a rate ceiling may fall and never rise" long after nothing
+    // enforced it. A stale CLAIM is worse than a stale tool name, because the
+    // tool name produces an error the agent can see and the claim produces
+    // confident inaction.
+    const STALE_CLAIMS = [
+      /may (only )?move in the safe direction/i,
+      /never loosen/i,
+      /may fall and never rise/i,
+      /may grow and never shrink/i,
+      /tighten[- ]only/i,
+    ]
+    const problems: string[] = []
+    for (const file of AGENT_FACING) {
+      const text = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8')
+      for (const [i, line] of stripComments(text).split('\n').entries()) {
+        for (const claim of STALE_CLAIMS) {
+          if (claim.test(line)) problems.push(`${file}:${i + 1}: ${line.trim().slice(0, 110)}`)
+        }
+      }
+    }
+    expect(problems).toEqual([])
+  })
+
+  test('the sweep would actually catch one', () => {
+    // A regex that matched nothing would make every assertion above vacuous.
+    const found = namedIn('playbook.ts')
+    expect(found.has('update_recon_settings')).toBe(true)
+    expect(found.has('preflight_scope_check')).toBe(true)
+  })
+})

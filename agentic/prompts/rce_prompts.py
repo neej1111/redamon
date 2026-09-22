@@ -102,9 +102,9 @@ Before crafting any payload, pull what recon already discovered:
 
 ```cypher
 MATCH (e:Endpoint) WHERE e.url CONTAINS '<target_host>' RETURN e.url, e.method LIMIT 50
-MATCH (p:Parameter) WHERE p.endpoint CONTAINS '<target_host>' RETURN p.name, p.location, p.endpoint LIMIT 100
-MATCH (t:Technology) WHERE t.host CONTAINS '<target_host>' RETURN t.name, t.version
-MATCH (h:Host {{ip:'<target_ip>'}})-[:RUNS]->(s:Service) RETURN s.port, s.product, s.version
+MATCH (p:Parameter) WHERE p.endpoint_path CONTAINS '<target_host>' RETURN p.name, p.position, p.endpoint_path LIMIT 100
+MATCH (b:BaseURL)-[:USES_TECHNOLOGY]->(t:Technology) WHERE b.url CONTAINS '<target_host>' RETURN t.name, t.version
+MATCH (i:IP {{address:'<target_ip>'}})-[:HAS_PORT]->(p:Port)-[:RUNS_SERVICE]->(s:Service) RETURN p.number, s.name, s.product
 ```
 
 The Technology node is critical -- it tells you which RCE primitive to prioritize:

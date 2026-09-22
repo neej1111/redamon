@@ -255,7 +255,33 @@ def _aggregate_external_domains(combined_result: dict) -> list:
     # SANs, js_recon subdomains): recorded, never scanned.
     for e in combined_result.get("discovered_external_domains", []):
         _merge_external_domain(aggregated, e)
+    for e in _js_recon_external_domains(combined_result):
+        _merge_external_domain(aggregated, e)
     return list(aggregated.values())
+
+
+def _js_recon_external_domains(combined_result: dict) -> list:
+    """Third-party hosts the target's JavaScript names, as external-domain entries.
+
+    The graph keeps no Endpoint for them, so this is their only record. JS recon
+    tests hosts against the root domain, which in IP mode is the synthetic
+    ip-targets name, so the target IPs come back as "external" and are dropped.
+    Only domain and source are passed: a URL a bundle names is not a redirect.
+    """
+    metadata = combined_result.get("metadata") or {}
+    targets = {
+        str(h).strip().lower()
+        for h in [*(combined_result.get("subdomains") or []),
+                  *(metadata.get("subdomain_filter") or []),
+                  *(metadata.get("expanded_ips") or [])]
+    }
+    entries = (combined_result.get("js_recon") or {}).get("external_domains") or []
+    return [
+        {"domain": e["domain"], "source": "js_recon"}
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("domain"), str)
+        and e["domain"].strip().lower() not in targets
+    ]
 
 
 def should_skip_active_scans(recon_data: dict) -> tuple:

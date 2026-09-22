@@ -147,6 +147,13 @@ async def execute_tool_node(
             'execute_nmap', 'execute_subfinder', 'execute_dnsx', 'execute_naabu',
             'execute_whatweb', 'query_graph',
         ]))
+        # graph_schema and graph_summary are DELIBERATELY absent from that list,
+        # and must stay absent. An agent that has spent its recon budget still
+        # needs to orient before it commits, and neither returns target data or
+        # emits a single packet: one is a static code-derived document, the
+        # other a count per label. Gating them would block the very step this
+        # budget exists to force.
+
         if iteration >= recon_budget and tool_name in discovery_tools:
             msg = (
                 f"RECON BUDGET EXCEEDED ({iteration} informational iterations; limit "

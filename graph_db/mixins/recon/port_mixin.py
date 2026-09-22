@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 from graph_db.cpe_resolver import _is_ip_address
+from graph_db.technology_identity import resolve_tech_name, resolve_tech_version
 
 class PortMixin:
     def update_graph_from_port_scan(self, recon_data: dict, user_id: str, project_id: str) -> dict:
@@ -173,14 +174,19 @@ class PortMixin:
                         ai_detected_by = ai_service.get("detected_by", "naabu-ai-port")
                         if ai_name and ai_category and ip_addr:
                             try:
+                                # MERGE on the version too: a MERGE without it creates
+                                # a NULL-version node the uniqueness constraint ignores.
+                                ai_name = resolve_tech_name(session, ai_name, user_id, project_id)
+                                ai_version = resolve_tech_version(
+                                    session, ai_name, "", user_id, project_id)
                                 session.run(
                                     """
-                                    MERGE (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
+                                    MERGE (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
                                     SET t.category = $category,
                                         t.source = 'ai-port-catalog',
                                         t.updated_at = datetime()
                                     """,
-                                    name=ai_name, category=ai_category,
+                                    name=ai_name, version=ai_version, category=ai_category,
                                     user_id=user_id, project_id=project_id,
                                 )
                                 stats.setdefault("ai_technologies_created", 0)
@@ -190,12 +196,12 @@ class PortMixin:
                                 session.run(
                                     """
                                     MATCH (p:Port {number: $port_number, protocol: $protocol, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
-                                    MATCH (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
+                                    MATCH (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
                                     MERGE (p)-[r:HAS_TECHNOLOGY]->(t)
                                     SET r.detected_by = $detected_by
                                     """,
                                     port_number=port_number, protocol=protocol, ip_addr=ip_addr,
-                                    name=ai_name, detected_by=ai_detected_by,
+                                    name=ai_name, version=ai_version, detected_by=ai_detected_by,
                                     user_id=user_id, project_id=project_id,
                                 )
                                 # Link Service -> Technology when we have a Service
@@ -203,12 +209,12 @@ class PortMixin:
                                     session.run(
                                         """
                                         MATCH (svc:Service {name: $service_name, port_number: $port_number, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
-                                        MATCH (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
+                                        MATCH (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
                                         MERGE (svc)-[r:USES_TECHNOLOGY]->(t)
                                         SET r.detected_by = $detected_by
                                         """,
                                         service_name=service_name, port_number=port_number, ip_addr=ip_addr,
-                                        name=ai_name, detected_by=ai_detected_by,
+                                        name=ai_name, version=ai_version, detected_by=ai_detected_by,
                                         user_id=user_id, project_id=project_id,
                                     )
                                 stats["relationships_created"] += 1
@@ -367,11 +373,11 @@ class PortMixin:
                         break
 
                 try:
+                    tech_name = resolve_tech_name(session, tech_name, user_id, project_id)
                     session.run(
                         """
-                        MERGE (t:Technology {name: $name, user_id: $user_id, project_id: $project_id})
-                        SET t.version = $version,
-                            t.source = 'nmap',
+                        MERGE (t:Technology {name: $name, version: $version, user_id: $user_id, project_id: $project_id})
+                        SET t.source = 'nmap',
                             t.cpe = $cpe,
                             t.updated_at = datetime()
                         """,

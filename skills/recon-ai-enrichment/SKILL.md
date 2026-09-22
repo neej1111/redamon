@@ -51,6 +51,14 @@ that toggles it, use `project-settings-cascade`.
   [recon/project_settings.py:1968](../../recon/project_settings.py#L1968)) is the
   single source of truth for per-tool AI flags. Presets must not hard-code them;
   update the Zod schema instead.
+- **ALWAYS add a registry entry for the new `Project` column** `{tool}Ai{Feature}`
+  in [recon_settings/registry.yaml](../../recon_settings/registry.yaml), beside
+  `ffufAiExtensions`, `nucleiAiTags`, `nucleiAiResponseFilter` and
+  `wafAiClassifier`. A test walking `Prisma.ProjectScalarFieldEnum` fails until
+  every column has one. An AI hook is an ordinary boolean toggle: `mcp:
+  settable`, `traffic: none` (the hook itself sends no traffic; the tool it
+  advises does), and a `meaning` that says which decision it moves from the
+  operator to the model.
 - **ALWAYS cache a per-target hook** keyed by tech fingerprint (Server,
   X-Powered-By, ...) so N targets behind one stack collapse to one LLM call
   ([ffuf_extensions.py](../../recon/helpers/ai_planner/ffuf_extensions.py)). A

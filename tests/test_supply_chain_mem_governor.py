@@ -236,8 +236,11 @@ class TestImportMiningBudgets(SupplyChainGovBase):
     them: two real in-memory accumulators outside the governor entirely."""
 
     def test_keys_are_registered_as_byte_budget_keys(self):
-        self.assertIn('SUPPLY_CHAIN_IMPORT_MAX_FILES', ps._GOV_BUDGET_KEYS)
-        self.assertIn('SUPPLY_CHAIN_IMPORT_MAX_BYTES', ps._GOV_BUDGET_KEYS)
+        # The table moved into recon_settings/registry.yaml; project_settings
+        # queries it rather than holding a second copy.
+        budget = ps._gov_budget_keys()
+        self.assertIn('SUPPLY_CHAIN_IMPORT_MAX_FILES', budget)
+        self.assertIn('SUPPLY_CHAIN_IMPORT_MAX_BYTES', budget)
 
     def test_keys_have_shipped_defaults(self):
         self.assertEqual(ps.DEFAULT_SETTINGS['SUPPLY_CHAIN_IMPORT_MAX_FILES'], 200)

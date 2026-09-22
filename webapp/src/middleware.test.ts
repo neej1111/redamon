@@ -216,3 +216,38 @@ describe('internal-key allowlist — auth-profile observe', () => {
     expect(internalKeyRouteAllowed('POST', '/api/internal/auth-profile/proj-1')).toBe(false)
   })
 })
+
+/* ------------------------------------------------------------------ */
+/*  MCP: the inbound server is public; the OUTBOUND plugin admin is not */
+/* ------------------------------------------------------------------ */
+
+describe('MCP path separation (plan 9.1/9.2)', () => {
+  test('/api/mcp-server passes the middleware with no cookie', async () => {
+    // An MCP client presents a bearer and no cookie. Without this the request
+    // is rejected before the handler, which does its own credential check.
+    const res = await middleware(makeRequest('/api/mcp-server'))
+    expect(res.status).toBe(200)
+  })
+
+  test.each([
+    '/api/mcp/manifest',
+    '/api/mcp/reload',
+    '/api/mcp/test',
+  ])('%s is still NOT public', async path => {
+    // The outbound plugin-admin namespace. Making it public - which a
+    // PUBLIC_PATHS entry of '/api/mcp' would do, since matching is
+    // `startsWith(p + '/')` - would expose all three unauthenticated.
+    const res = await middleware(makeRequest(path))
+    expect(res.status).toBe(401)
+  })
+
+  test('a path merely starting with the same letters is not public', async () => {
+    const res = await middleware(makeRequest('/api/mcp-servers-admin'))
+    expect(res.status).toBe(401)
+  })
+
+  test('a sub-path of the MCP server is public too, and nothing else is', async () => {
+    expect((await middleware(makeRequest('/api/mcp-server/'))).status).toBe(200)
+    expect((await middleware(makeRequest('/api/mcpserver'))).status).toBe(401)
+  })
+})
