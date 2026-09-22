@@ -34,6 +34,12 @@ const XAI_PATH = 'M0 1.5h4.2l5.5 8.5L16.5 1.5H22l-9.8 12L24 22.5h-4.7l-6-9-6.5 9
 /* Mistral AI - stylised M letterform with diagonal cut */
 const MISTRAL_PATH = 'M0 3h5.5l6.5 10.5L18.5 3H24v18h-4.5V9.8l-5.5 8.7H9.5L4 9.8V21H0Z'
 
+/* NVIDIA - stylised N letterform (simplified brand-style mark) */
+const NVIDIA_PATH = 'M3 3h5.2l8 12.6V3H21v18h-5.2L7.8 8.4V21H3Z'
+
+/* Arliai - stylised A letterform (simplified brand-style mark) */
+const ARLIAI_PATH = 'M12 2 22.5 21h-4.9l-1.8-9.2L12 2Zm0 0L8.2 11.8 6.4 21H1.5L12 2Zm0 8.2 2.6 10.8h-5.2L12 10.2Z'
+
 export const SiDeepseek = (props: IconProps) => (
   <BrandSvg {...props} title={props.title ?? 'DeepSeek'} path={DEEPSEEK_PATH} />
 )

@@ -234,6 +234,8 @@ async def check_target_guardrail(body: GuardrailRequest):
                 qwen_p = _resolve_provider_key(user_providers, "qwen")
                 xai_p = _resolve_provider_key(user_providers, "xai")
                 mistral_p = _resolve_provider_key(user_providers, "mistral")
+                nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+                arliai_p = _resolve_provider_key(user_providers, "arliai")
 
                 orchestrator.llm = setup_llm(
                     model_name,
@@ -247,6 +249,8 @@ async def check_target_guardrail(body: GuardrailRequest):
                     qwen_api_key=(qwen_p or {}).get("apiKey"),
                     xai_api_key=(xai_p or {}).get("apiKey"),
                     mistral_api_key=(mistral_p or {}).get("apiKey"),
+                    nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+                    arliai_api_key=(arliai_p or {}).get("apiKey"),
                 )
                 orchestrator.model_name = model_name
                 logger.info(f"Guardrail: bootstrapped LLM with default model {model_name}")
@@ -524,6 +528,8 @@ def _build_llm_with_model_for_user(model_name: str, user_id: Optional[str]):
     glm_p = _resolve_provider_key(user_providers, "glm")
     kimi_p = _resolve_provider_key(user_providers, "kimi")
     qwen_p = _resolve_provider_key(user_providers, "qwen")
+    nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+    arliai_p = _resolve_provider_key(user_providers, "arliai")
     xai_p = _resolve_provider_key(user_providers, "xai")
     mistral_p = _resolve_provider_key(user_providers, "mistral")
 
@@ -541,6 +547,8 @@ def _build_llm_with_model_for_user(model_name: str, user_id: Optional[str]):
         qwen_api_key=(qwen_p or {}).get("apiKey"),
         xai_api_key=(xai_p or {}).get("apiKey"),
         mistral_api_key=(mistral_p or {}).get("apiKey"),
+        nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+        arliai_api_key=(arliai_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
         aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
@@ -1186,6 +1194,8 @@ def _setup_llm_for_endpoint(model_name: str) -> "BaseChatModel":
     deepseek_p = _resolve_provider_key(user_providers, "deepseek")
     gemini_p = _resolve_provider_key(user_providers, "gemini")
     glm_p = _resolve_provider_key(user_providers, "glm")
+    nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+    arliai_p = _resolve_provider_key(user_providers, "arliai")
     kimi_p = _resolve_provider_key(user_providers, "kimi")
     qwen_p = _resolve_provider_key(user_providers, "qwen")
     xai_p = _resolve_provider_key(user_providers, "xai")
@@ -1203,6 +1213,8 @@ def _setup_llm_for_endpoint(model_name: str) -> "BaseChatModel":
         qwen_api_key=(qwen_p or {}).get("apiKey"),
         xai_api_key=(xai_p or {}).get("apiKey"),
         mistral_api_key=(mistral_p or {}).get("apiKey"),
+        nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+        arliai_api_key=(arliai_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
         aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
@@ -1298,6 +1310,8 @@ def _build_llm_for_user(user_id: Optional[str]):
     openrouter_p = _resolve_provider_key(user_providers, "openrouter")
     bedrock_p = _resolve_provider_key(user_providers, "bedrock")
     deepseek_p = _resolve_provider_key(user_providers, "deepseek")
+    nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+    arliai_p = _resolve_provider_key(user_providers, "arliai")
     gemini_p = _resolve_provider_key(user_providers, "gemini")
     glm_p = _resolve_provider_key(user_providers, "glm")
     kimi_p = _resolve_provider_key(user_providers, "kimi")
@@ -1316,6 +1330,8 @@ def _build_llm_for_user(user_id: Optional[str]):
         qwen_api_key=(qwen_p or {}).get("apiKey"),
         xai_api_key=(xai_p or {}).get("apiKey"),
         mistral_api_key=(mistral_p or {}).get("apiKey"),
+        nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+        arliai_api_key=(arliai_p or {}).get("apiKey"),
         aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
         aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
         aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
@@ -1942,6 +1958,28 @@ async def test_llm_provider(body: LlmProviderTestRequest):
                 )
             pick = next((m for m in available if "small" in m["id"].lower() or "nemo" in m["id"].lower()), available[0])
             llm = setup_llm(pick["id"], mistral_api_key=body.apiKey)
+        elif ptype == "nvidia":
+            from orchestrator_helpers.model_providers import fetch_nvidia_models
+            available = await fetch_nvidia_models(api_key=body.apiKey)
+            if not available:
+                return JSONResponse(
+                    content={"success": False, "error": "No NVIDIA NIM models available for this API key"},
+                    status_code=400,
+                )
+            pick = next((m for m in available if "instruct" in m["id"].lower() or "chat" in m["id"].lower()), available[0])
+            llm = setup_llm(pick["id"], nvidia_api_key=body.apiKey)
+        elif ptype == "arliai":
+            from orchestrator_helpers.model_providers import fetch_arliai_models
+            available = await fetch_arliai_models(api_key=body.apiKey)
+            if not available:
+                return JSONResponse(
+                    content={"success": False, "error": "No Arliai models available for this API key"},
+                    status_code=400,
+                )
+            # Prefer the DeepSeek-class distill for the smoke test (closest to
+            # what agent sessions will actually run on this provider).
+            pick = next((m for m in available if "deepseek" in m["id"].lower()), available[0])
+            llm = setup_llm(pick["id"], arliai_api_key=body.apiKey)
         elif ptype == "bedrock":
             from orchestrator_helpers.model_providers import fetch_bedrock_models
             available = await fetch_bedrock_models(
@@ -2647,6 +2685,8 @@ async def text_to_cypher(body: TextToCypherRequest):
     openai_p = _resolve_provider_key(user_providers, "openai")
     anthropic_p = _resolve_provider_key(user_providers, "anthropic")
     openrouter_p = _resolve_provider_key(user_providers, "openrouter")
+    nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+    arliai_p = _resolve_provider_key(user_providers, "arliai")
     bedrock_p = _resolve_provider_key(user_providers, "bedrock")
     deepseek_p = _resolve_provider_key(user_providers, "deepseek")
     gemini_p = _resolve_provider_key(user_providers, "gemini")
@@ -2687,6 +2727,8 @@ async def text_to_cypher(body: TextToCypherRequest):
                 qwen_api_key=(qwen_p or {}).get("apiKey"),
                 xai_api_key=(xai_p or {}).get("apiKey"),
                 mistral_api_key=(mistral_p or {}).get("apiKey"),
+                nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+                arliai_api_key=(arliai_p or {}).get("apiKey"),
                 aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
                 aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
                 aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),

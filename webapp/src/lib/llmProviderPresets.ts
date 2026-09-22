@@ -74,6 +74,8 @@ export const PROVIDER_TYPES = [
   { id: 'qwen', name: 'Qwen (Alibaba)', description: 'Open-source models from Alibaba with strong reasoning.', Icon: SiQwen as ProviderIcon, apiKeyUrl: 'https://bailian.console.aliyun.com/?apiKey=1#/api-key' },
   { id: 'xai', name: 'xAI (Grok)', description: 'Grok models by xAI - state-of-the-art reasoning.', Icon: SiXai as ProviderIcon, apiKeyUrl: 'https://console.x.ai/' },
   { id: 'mistral', name: 'Mistral AI', description: 'Mistral models - open-weight and commercial.', Icon: SiMistral as ProviderIcon, apiKeyUrl: 'https://console.mistral.ai/api-keys/' },
+  { id: 'nvidia', name: 'NVIDIA NIM', description: 'NVIDIA-hosted open models via integrate.api.nvidia.com.', Icon: SiNvidia as ProviderIcon, apiKeyUrl: 'https://build.nvidia.com/settings/api-keys' },
+  { id: 'arliai', name: 'Arliai', description: 'Community fine-tunes on Aphrodite/vLLM (arliai.com).', Icon: SiArliai as ProviderIcon, apiKeyUrl: 'https://www.arliai.com/api-key' },
   { id: 'bedrock', name: 'AWS Bedrock', description: 'AWS Bedrock foundation models', Icon: FaAws as ProviderIcon, apiKeyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials' },
   { id: 'openai_compatible', name: 'OpenAI-Compatible', description: 'Any OpenAI-compatible endpoint (Ollama, vLLM, Groq, etc.)', Icon: LuSettings as ProviderIcon, apiKeyUrl: '' },
 ] as const

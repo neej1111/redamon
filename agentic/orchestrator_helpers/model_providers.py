@@ -643,6 +643,8 @@ async def fetch_all_models(
             tasks_db[f"Mistral AI ({pname})"] = fetch_mistral_models(api_key=p.get("apiKey", ""))
         elif ptype == "nvidia":
             tasks_db[f"NVIDIA NIM ({pname})"] = fetch_nvidia_models(api_key=p.get("apiKey", ""))
+        elif ptype == "arliai":
+            tasks_db[f"Arliai ({pname})"] = fetch_arliai_models(api_key=p.get("apiKey", ""))
         elif ptype == "bedrock":
             tasks_db[f"AWS Bedrock ({pname})"] = fetch_bedrock_models(
                 region=p.get("awsRegion", "us-east-1"),
