@@ -150,7 +150,7 @@ export default function InsightsPage() {
           currentProject?.domainBatchMode
             // A batch project has no single targetDomain; name its groups so the
             // header is not blank.
-            ? `${currentProject.domainBatchDomains?.length ?? 0} domains`
+            ? `${currentProject.domainBatchDomains?.length ?? 0} domains` + ((currentProject.domainBatchWildcardDomains?.length ?? 0) > 0 ? ` (${currentProject.domainBatchWildcardDomains?.length} enumerated)` : '')
             : currentProject?.targetDomain || null
         }
         ipMode={currentProject?.ipMode || false}

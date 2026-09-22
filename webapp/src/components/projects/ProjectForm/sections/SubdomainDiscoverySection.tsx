@@ -24,7 +24,17 @@ export function SubdomainDiscoverySection({ data, updateField, onRun }: Subdomai
   // When explicit Subdomain Prefixes are set in Target Configuration, the
   // backend runs in FILTERED mode and skips every discovery source. Lock the
   // master toggle OFF here so the UI matches actual pipeline behavior.
-  const hasExplicitPrefixes = (data.subdomainList ?? []).some(
+  // A Domain batch keeps its scope in domainBatchHosts and leaves subdomainList
+  // EMPTY, so every check below reads as "no prefixes, no root" for it. That was
+  // harmless while the backend force-disabled discovery for every batch; now the
+  // toggle decides whether a `*` group may enumerate, so it needs its own branch
+  // or it would promise single-domain behaviour a batch never performs.
+  const batchMode = data.domainBatchMode === true
+  const batchWildcardCount = batchMode
+    ? (data.domainBatchHosts ?? []).filter(h => String(h).trim().startsWith('*')).length
+    : 0
+
+  const hasExplicitPrefixes = !batchMode && (data.subdomainList ?? []).some(
     (s) => s !== '.' && s.replace(/\.$/, '').length > 0
   )
   const lockReason = hasExplicitPrefixes
@@ -38,6 +48,24 @@ export function SubdomainDiscoverySection({ data, updateField, onRun }: Subdomai
   // would have zero targets and that Include Root Domain will be auto-enabled
   // (TargetSection's forceIncludeRootDomain effect handles the actual flip).
   const handleMasterToggle = async (checked: boolean) => {
+    if (!checked && batchMode) {
+      // In a batch this toggle only ever governed the `*` groups; the literal
+      // ones scan their own hostnames either way. Turning it off leaves a
+      // wildcard group with nothing to enumerate, which the pipeline refuses
+      // rather than silently reporting an empty group as a success.
+      if (batchWildcardCount > 0) {
+        const ok = await confirm(
+          `You are turning off Subdomain Discovery while ${batchWildcardCount} wildcard ` +
+          `entr${batchWildcardCount === 1 ? 'y is' : 'ies are'} in the hostname list. ` +
+          'Those groups exist to be enumerated, so the scan will refuse to run them. ' +
+          'Remove the wildcards, or leave discovery on. Continue?',
+          'Disable Subdomain Discovery?'
+        )
+        if (!ok) return
+      }
+      updateField('subdomainDiscoveryEnabled', checked)
+      return
+    }
     if (!checked && !hasExplicitPrefixes && !includesRootDomain) {
       const ok = await confirm(
         'You are turning off Subdomain Discovery while no Subdomain Prefixes are set. ' +

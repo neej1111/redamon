@@ -264,20 +264,6 @@
   background: var(--bg-tertiary);
 }
 
-/* The overwrite scope is the one irreversible permission; it is flagged even
-   unticked, and louder once ticked. */
-.scopeDanger {
-  border-color: rgba(220, 38, 38, 0.35);
-  background: rgba(220, 38, 38, 0.04);
-}
-
-.scopeDanger:hover { border-color: rgba(220, 38, 38, 0.6); }
-
-.scopeDanger.scopeChecked {
-  border-color: var(--danger-text, #dc2626);
-  background: rgba(220, 38, 38, 0.1);
-}
-
 .scopeCheckbox { margin-top: 2px; }
 
 .scopeText {
@@ -300,7 +286,37 @@
   color: var(--text-primary);
 }
 
-.scopeDanger .scopeLabel { color: var(--danger-text, #dc2626); }
+/* What the permission touches. `read` is deliberately quiet - a permission that
+   changes nothing needs no attention - and everything that can write shares one
+   chip, because the operator's question is whether state moves at all, not how
+   much of the row also reads. */
+.scopeAccess {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  /* Uppercase has no descenders, so the line box's slack all falls BELOW the
+     glyphs and the text rides high in the pill. line-height:1 pins the box to
+     the text, and the extra top padding puts it on the optical centre. */
+  line-height: 1;
+  padding: 4px 7px 3px;
+  white-space: nowrap;
+}
+
+.scopeAccessRead {
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-color: var(--border-default);
+}
+
+.scopeAccessWrite {
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+}
 
 .scopeCode {
   font-family: var(--font-mono, monospace);

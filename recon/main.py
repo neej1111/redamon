@@ -20,6 +20,7 @@ Run this file to execute the full recon pipeline.
 import sys
 import json
 import copy
+import re
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -314,6 +315,143 @@ def should_skip_active_scans(recon_data: dict) -> tuple:
     return False, ""
 
 
+# A subdomain prefix must be a hostname label (or dot-joined labels). The
+# webapp validates this, but SUBDOMAIN_LIST crosses back in from the API with
+# only a whitespace strip, so parse_target re-checks rather than trusting it.
+_PREFIX_CHARSET = re.compile(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
+
+
+def merge_group_hosts(recon_result, target_info: dict, root_domain: str,
+                      settings: dict, dns_enabled: bool = True,
+                      resolver=None) -> dict:
+    """Merge what discovery found with the hosts the operator named.
+
+    Returns ``{subdomains, dns, status_map, include_root}``.
+
+    Three things have to be true at once and each has bitten:
+
+    - The apex is scanned only when "Include Root Domain" asked for it, and
+      ``include_root`` must ALWAYS be stamped into metadata: an absent key reads
+      as True downstream (target_helpers), which scans the apex the operator
+      deliberately left out.
+    - A wildcard group may also list explicit hosts. Enumeration is not
+      guaranteed to surface them, so they are seeded - nothing the operator
+      pasted may be silently dropped. (A single-domain run arrives with
+      ``full_subdomains`` empty, so the seeding is a no-op there.)
+    - Anything seeded was never part of discovery's own resolution pass, so it
+      carries no DNS and every later phase skips it as unresolved. Resolving
+      only when discovery returned NOTHING would cover the total-failure case
+      while silently dropping exactly the host seeding exists to protect: the
+      sibling enumeration happened to miss. Note the total-failure case still
+      needs covering, because discover_subdomains() builds its result dict
+      unconditionally - every-source-failed returns a TRUTHY dict with an empty
+      subdomain list.
+
+    Split out of run_domain_recon so it can be tested as the thing the pipeline
+    calls; inlined, it was only reachable through the whole 750-line phase.
+    """
+    from recon.main_recon_modules.ip_filter import is_never_scannable_ip
+
+    discovered_subs = []
+    if recon_result:
+        discovered_subs = list(recon_result.get("subdomains") or [])
+        discovered_subs = _filter_roe_excluded(
+            discovered_subs, settings, label="discovered subdomain")
+
+    include_root = bool(target_info.get("include_root_domain", False))
+    if include_root and root_domain not in discovered_subs:
+        discovered_subs.insert(0, root_domain)
+    for host in target_info.get("full_subdomains") or []:
+        if host not in discovered_subs:
+            discovered_subs.append(host)
+
+    discovered_dns = dict((recon_result or {}).get("dns") or {})
+    resolved = dict(discovered_dns.get("subdomains") or {})
+    missing = [h for h in discovered_subs if h != root_domain and h not in resolved]
+    need_root = include_root and not (discovered_dns.get("domain") or {})
+    if dns_enabled and (missing or need_root):
+        print(f"[*][DNS] Resolving {len(missing)} host(s) discovery did not resolve"
+              f"{' (plus the root domain)' if need_root else ''}")
+        if resolver is None:
+            from recon.main_recon_modules.domain_recon import resolve_all_dns as resolver
+        dns_result = resolver(
+            root_domain, missing,
+            max_workers=settings.get('DNS_MAX_WORKERS', 50),
+            record_parallelism=settings.get('DNS_RECORD_PARALLELISM', True),
+            settings=settings) or {}
+        resolved.update(dns_result.get("subdomains") or {})
+        discovered_dns["subdomains"] = resolved
+        if need_root:
+            discovered_dns["domain"] = dns_result.get("domain") or {}
+    discovered_dns.setdefault("domain", {})
+    discovered_dns.setdefault("subdomains", resolved)
+
+    # SSRF / scope-escape guard on what ENUMERATION dragged in.
+    #
+    # A discovered name is the domain owner's DNS, not ours: `localhost.<domain>
+    # -> 127.0.0.1` is a real and common record (vulnweb.com publishes one), and
+    # `x.<domain> -> 169.254.169.254` is cloud metadata. Neither is a host this
+    # scanner may probe, and no downstream phase re-checks - port_scan and
+    # http_probe filter nothing, so whatever lands here is what gets scanned.
+    #
+    # target_helpers has this guard already, but only for SAN-derived names, and
+    # it re-resolves via getaddrinfo. Here DNS has already run, so the answer is
+    # in `resolved` and costs nothing.
+    #
+    # Operator-supplied hosts are NOT filtered: if someone typed it, scanning it
+    # is their decision. This drops only what discovery volunteered.
+    listed = set(target_info.get("full_subdomains") or [])
+    kept, dropped = [], []
+    for host in discovered_subs:
+        if host == root_domain or host in listed:
+            kept.append(host)
+            continue
+        addrs = ((resolved.get(host) or {}).get("ips") or {})
+        flat = list(addrs.get("ipv4") or []) + list(addrs.get("ipv6") or [])
+        if any(is_never_scannable_ip(a) for a in flat):
+            dropped.append((host, flat))
+        else:
+            kept.append(host)
+    if dropped:
+        for host, flat in dropped:
+            print(f"[!][Scope] Dropped discovered host {host} -> {flat}: "
+                  f"loopback/link-local/multicast is never a scan target")
+        discovered_subs = kept
+        for host, _ in dropped:
+            resolved.pop(host, None)
+        discovered_dns["subdomains"] = resolved
+
+    status_map = (recon_result or {}).get("subdomain_status_map") or {}
+    return {
+        "subdomains": discovered_subs,
+        "dns": discovered_dns,
+        "status_map": {s: st for s, st in status_map.items()
+                       if s in set(discovered_subs)},
+        "include_root": include_root,
+    }
+
+
+def group_discovery_enabled(settings: dict, batch_groups: list,
+                            target_info: dict) -> bool:
+    """May THIS target run subdomain enumeration?
+
+    The settings toggle is a run-wide scalar, so on its own it can only say
+    whether enumeration is permitted at all. In a Domain batch the answer is per
+    GROUP: a group enumerates only when the operator wrote a wildcard for it, and
+    every other group scans exactly the hostnames it was given - the contract the
+    run-wide force-off in project_settings used to enforce by itself.
+
+    Split out of run_domain_group so it can be tested as the thing the pipeline
+    actually calls, rather than re-stated in a test that would still pass if the
+    gate were deleted.
+    """
+    if not settings.get('SUBDOMAIN_DISCOVERY_ENABLED', True):
+        return False
+    if not batch_groups:
+        return True              # single-domain: the toggle is the whole answer
+    return bool(target_info.get('wildcard_mode', False))
+
+
 def parse_target(target: str, subdomain_list: list = None) -> dict:
     """
     Parse target domain and determine scan mode based on SUBDOMAIN_LIST.
@@ -324,15 +462,20 @@ def parse_target(target: str, subdomain_list: list = None) -> dict:
         subdomain_list: List of subdomain prefixes to filter (e.g., ["testphp.", "www."])
                        Empty list = full discovery mode (scan all subdomains)
                        Special prefix "." = include root domain directly (no subdomain)
+                       Special prefix "*" = enumerate this domain (full discovery)
 
     Returns:
         Dictionary with:
         - target: original target (root domain)
         - root_domain: the root domain (same as target)
-        - filtered_mode: True if SUBDOMAIN_LIST has entries (filtered scan)
+        - filtered_mode: True if real subdomain prefixes are set AND no wildcard
         - subdomain_list: list of subdomain prefixes to scan
         - full_subdomains: list of full subdomain names (prefix + root domain)
         - include_root_domain: True if "." is in subdomain_list (scan root domain directly)
+        - wildcard_mode: True if "*" is in subdomain_list (enumerate the domain)
+
+    Neither sentinel is a hostname: "*" never reaches full_subdomains, and "."
+    contributes the root itself rather than a prefixed name.
     """
     # TARGET_DOMAIN is always the root domain (e.g., "vulnweb.com")
     root_domain = target
@@ -343,9 +486,29 @@ def parse_target(target: str, subdomain_list: list = None) -> dict:
 
     # Build full subdomain names from prefixes
     full_subdomains = []
+    wildcard_mode = False
     for prefix in subdomain_list:
+        # "*" means "enumerate this domain" — run the same full discovery a
+        # single-domain project runs. Matched EXACTLY and before rstrip('.'):
+        # toStoredPrefixes() appends a trailing dot, so an operator typing "*"
+        # into the single-domain Subdomain Prefixes box produces "*.", and
+        # treating that as the sentinel would turn a scope-NARROWING field into
+        # a silent full-enumeration switch.
+        if prefix == '*':
+            wildcard_mode = True
+            continue
         # Handle "." as special case meaning root domain itself
         clean_prefix = prefix.rstrip('.')
+        # Anything that is not a hostname label is DROPPED, never repaired.
+        # SUBDOMAIN_LIST gets no charset check anywhere server-side (see
+        # fetch_project_settings, which only strips whitespace), so a row edited
+        # through the API or the database can put arbitrary text here — and
+        # "*." is the ordinary near-miss: it is not the "*" sentinel, so without
+        # this it would build the literal hostname "*.example.com" and carry a
+        # metacharacter into DNS, tool arguments, filenames and the graph.
+        if clean_prefix and not _PREFIX_CHARSET.match(clean_prefix):
+            print(f"[!][Pipeline] Ignoring unusable subdomain prefix: {prefix!r}")
+            continue
         if clean_prefix == "" or prefix == ".":
             # "." means include root domain directly (e.g., vulnweb.com)
             include_root_domain = True
@@ -358,10 +521,15 @@ def parse_target(target: str, subdomain_list: list = None) -> dict:
             if full_subdomain not in full_subdomains:
                 full_subdomains.append(full_subdomain)
 
-    # Filtered mode only when actual subdomain prefixes are specified (not just ".")
-    # "." alone means "include root domain" — it should NOT skip subdomain discovery
-    actual_prefixes = [p for p in subdomain_list if p.rstrip('.') != "" and p != "."]
-    filtered_mode = len(actual_prefixes) > 0
+    # Filtered mode only when real subdomain prefixes SURVIVED (not just "."),
+    # counted from what we actually built rather than from the raw input: a
+    # prefix dropped above as unusable must not still switch the pipeline into
+    # filtered mode, or the run would scan an empty list and report success.
+    # "." alone means "include root domain" — it should NOT skip discovery.
+    real_prefix_count = len([h for h in full_subdomains if h != root_domain])
+    # A wildcard wins over explicit siblings: the group enumerates, and those
+    # siblings are seeded into the result so nothing the operator listed is lost.
+    filtered_mode = real_prefix_count > 0 and not wildcard_mode
 
     return {
         "target": target,
@@ -369,7 +537,8 @@ def parse_target(target: str, subdomain_list: list = None) -> dict:
         "filtered_mode": filtered_mode,
         "subdomain_list": subdomain_list,
         "full_subdomains": full_subdomains,
-        "include_root_domain": include_root_domain
+        "include_root_domain": include_root_domain,
+        "wildcard_mode": wildcard_mode
     }
 
 
@@ -1122,7 +1291,8 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
 
 
 def run_domain_recon(target: str, bruteforce: bool = False,
-                     target_info: dict = None) -> dict:
+                     target_info: dict = None,
+                     discovery_enabled: bool = None) -> dict:
     """
     Run combined WHOIS + subdomain discovery + DNS resolution.
     Produces a single unified JSON file with incremental saves.
@@ -1145,14 +1315,43 @@ def run_domain_recon(target: str, bruteforce: bool = False,
     if target_info is None:
         target_info = parse_target(target, SUBDOMAIN_LIST)
 
-    # Auto-promote to FILTERED MODE when discovery is disabled and only the root
+    # The per-group answer to "may this target enumerate". Decided by the caller
+    # (run_domain_group), because only it sees one batch group's prefixes; None
+    # means "no caller opinion", which is the standalone/test path.
+    if discovery_enabled is None:
+        discovery_enabled = _settings.get('SUBDOMAIN_DISCOVERY_ENABLED', True)
+
+    # Auto-promote to FILTERED MODE when discovery is disabled and the root
     # domain is in scope. Without this, the FULL DISCOVERY branch runs but the
     # discovery step is skipped, leaving subdomains/dns empty and the rest of
     # the pipeline with no targets to chew on (silent failure).
+    #
+    # A wildcard group reaches here with include_root_domain False whenever the
+    # operator did not also tick "include root", so the condition below cannot
+    # save it — it would fall through to FULL DISCOVERY with discovery off and
+    # produce an empty group that still exits 0. Refuse instead: a wildcard means
+    # "enumerate", and a wildcard that cannot enumerate has nothing to scan.
+    if not discovery_enabled and target_info.get("wildcard_mode"):
+        if not target_info["full_subdomains"]:
+            raise RuntimeError(
+                f"'{target_info['root_domain']}' was listed as a wildcard "
+                f"(enumerate) but Subdomain Discovery is disabled and no hosts "
+                f"were listed for it, so there is nothing to scan. Enable "
+                f"Subdomain Discovery, or replace the wildcard with hostnames."
+            )
+        target_info["filtered_mode"] = True
+        # The graph property means "this domain WAS enumerated", and this group
+        # is about to not be. Leaving it set would label a filtered scan as a
+        # full one on the Domain node, which is the exact ambiguity the property
+        # was added to remove.
+        target_info["wildcard_mode"] = False
+        print("[*][Pipeline] Wildcard + discovery disabled → FILTERED MODE over "
+              "the explicitly listed hosts only")
+
     if (
         not target_info["filtered_mode"]
         and target_info.get("include_root_domain")
-        and not _settings.get('SUBDOMAIN_DISCOVERY_ENABLED', True)
+        and not discovery_enabled
     ):
         target_info["filtered_mode"] = True
         if target_info["root_domain"] not in target_info["full_subdomains"]:
@@ -1168,7 +1367,10 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         print(f"[*][Pipeline] Mode: FILTERED SUBDOMAIN SCAN")
         print(f"[*][Pipeline] Subdomains: {', '.join(full_subdomains)}")
     else:
-        print(f"[*][Pipeline] Mode: FULL DISCOVERY (all subdomains)")
+        if target_info.get("wildcard_mode"):
+            print(f"[*][Pipeline] Mode: FULL DISCOVERY (wildcard)")
+        else:
+            print(f"[*][Pipeline] Mode: FULL DISCOVERY (all subdomains)")
 
     # Setup output file and background graph executor. In a Domain batch each
     # group writes its OWN file; sharing the canonical one would make every group
@@ -1188,6 +1390,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             "user_id": USER_ID,
             "project_id": PROJECT_ID,
             "filtered_mode": filtered_mode,
+            "wildcard_mode": bool(target_info.get("wildcard_mode")),
             "subdomain_filter": full_subdomains if filtered_mode else [],
             "anonymous_mode": False,
             "bruteforce_mode": bruteforce if not filtered_mode else False,
@@ -1278,7 +1481,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                     whois_lookup, root_domain, save_output=False, settings=_settings
                 )
 
-            if _settings.get('SUBDOMAIN_DISCOVERY_ENABLED', True):
+            if discovery_enabled:
                 g1_futures["discovery"] = g1_exec.submit(
                     discover_subdomains, root_domain,
                     bruteforce=bruteforce,
@@ -1316,23 +1519,22 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         # Subdomain discovery
         recon_result = g1_results.get("discovery")
         if recon_result:
-            discovered_subs = recon_result.get("subdomains", [])
-            discovered_subs = _filter_roe_excluded(discovered_subs, _settings, label="discovered subdomain")
-            # Ensure root domain is included when "Include Root Domain" is toggled
-            include_root = target_info.get("include_root_domain", False)
-            if include_root and root_domain not in discovered_subs:
-                discovered_subs.insert(0, root_domain)
-            combined_result["subdomains"] = discovered_subs
-            combined_result["subdomain_count"] = len(discovered_subs)
             combined_result["metadata"]["modules_executed"].append("subdomain_discovery")
             if recon_result.get("external_domains"):
                 combined_result["domain_discovery_external_domains"] = recon_result["external_domains"]
-            combined_result["dns"] = recon_result.get("dns") or {}
-            # Pass subdomain status map (filtered to match ROE-filtered subdomains)
-            status_map = recon_result.get("subdomain_status_map", {})
-            status_map = {s: st for s, st in status_map.items() if s in set(discovered_subs)}
-            combined_result["subdomain_status_map"] = status_map
-            combined_result["metadata"]["include_root_domain"] = include_root
+
+        merged = merge_group_hosts(
+            recon_result, target_info, root_domain, _settings, dns_enabled)
+        discovered_subs = merged["subdomains"]
+
+        combined_result["subdomains"] = discovered_subs
+        combined_result["subdomain_count"] = len(discovered_subs)
+        combined_result["dns"] = merged["dns"]
+        combined_result["subdomain_status_map"] = merged["status_map"]
+        # Always stamped: a missing key defaults to True in target_helpers, which
+        # would scan the apex the operator deliberately left out.
+        combined_result["metadata"]["include_root_domain"] = merged["include_root"]
+        if discovered_subs:
             combined_result["metadata"]["modules_executed"].append("dns_resolution")
             print(f"[+][Discovery] Merged: {len(discovered_subs)} subdomains")
         else:
@@ -1899,8 +2101,12 @@ def run_domain_batch(groups: list, start_time) -> int:
     print("═" * 63)
     print(f"[*][Batch] DOMAIN BATCH: {total} domain group(s), sequential")
     for idx, group in enumerate(groups, 1):
-        print(f"  [*][Batch] {idx}. {group.get('rootDomain')} "
-              f"({len(group.get('prefixes') or [])} host(s))")
+        _pfx = group.get('prefixes') or []
+        # '*' is a sentinel, not a host — counting it as one would advertise a
+        # group that enumerates thousands of names as "1 host".
+        _shape = ('enumerate' if '*' in _pfx
+                  else f"{len([p for p in _pfx if p != '*'])} host(s)")
+        print(f"  [*][Batch] {idx}. {group.get('rootDomain')} ({_shape})")
     print("═" * 63)
     print()
 
@@ -2058,6 +2264,15 @@ def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) 
     root_domain = target_info["root_domain"]
     full_subdomains = target_info["full_subdomains"]
 
+    # May THIS target enumerate? The settings toggle is a run-wide scalar, so it
+    # can only say whether enumeration is allowed at all; in a Domain batch the
+    # answer is per group, and only here do we hold one group's prefixes. A batch
+    # group enumerates ONLY when the operator wrote a wildcard for it — every
+    # other group scans exactly the hostnames it was given, which is the contract
+    # the run-wide force-off in project_settings used to enforce on its own.
+    discovery_enabled = group_discovery_enabled(
+        _settings, _batch_groups(), target_info)
+
     # RoE: check if root domain itself is excluded
     if _settings.get('ROE_ENABLED') and _settings.get('ROE_EXCLUDED_HOSTS'):
         if _is_roe_excluded(target_domain, _settings['ROE_EXCLUDED_HOSTS']):
@@ -2106,7 +2321,8 @@ def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) 
         domain_result = run_domain_recon(
             target_domain,
             bruteforce=USE_BRUTEFORCE_FOR_SUBDOMAINS,
-            target_info=target_info
+            target_info=target_info,
+            discovery_enabled=discovery_enabled
         )
     else:
         # Load existing recon file if domain_discovery not in modules

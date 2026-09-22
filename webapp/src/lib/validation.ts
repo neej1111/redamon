@@ -1,3 +1,5 @@
+import { splitWildcard } from './domainBatch'
+
 // === IP / Network ===
 export const REGEX_IPV4 = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
 export const REGEX_IPV6 = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/
@@ -89,7 +91,12 @@ export function validateProjectForm(data: Record<string, unknown>): ValidationEr
       errors.push({ field: 'domainBatchHosts', message: 'At least one hostname is required in Domain batch mode' })
     }
     for (const host of nonEmpty) {
-      if (!isValidDomain(host.trim())) {
+      // A batch entry may carry the wildcard marker. Strip it with the SAME
+      // helper the grouper uses, rather than widening REGEX_DOMAIN: this check
+      // and validateDomainBatch() run over the same list, so if they disagree
+      // about what a wildcard is, one of them blocks a submit the other allowed.
+      const { rest } = splitWildcard(host.trim().toLowerCase())
+      if (!isValidDomain(rest)) {
         errors.push({ field: 'domainBatchHosts', message: `Invalid hostname: ${host.trim()}` })
       }
     }

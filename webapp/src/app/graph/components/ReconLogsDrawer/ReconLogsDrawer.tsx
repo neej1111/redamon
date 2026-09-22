@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { X, Terminal, CheckCircle, AlertCircle, Pause, Play, Trash2, Square, Loader2, Download } from 'lucide-react'
-import { RECON_PHASES } from '@/lib/recon-types'
 import type { ReconLogEvent, ReconStatus } from '@/lib/recon-types'
 import styles from './ReconLogsDrawer.module.css'
 
@@ -18,7 +17,6 @@ interface ReconLogsDrawerProps {
   onResume?: () => void
   onStop?: () => void
   title?: string
-  phases?: readonly string[]
   totalPhases?: number
   errorMessage?: string | null
   hidePhaseProgress?: boolean
@@ -41,7 +39,6 @@ export function ReconLogsDrawer({
   onResume,
   onStop,
   title = 'Reconnaissance Logs',
-  phases = RECON_PHASES,
   totalPhases = 7,
   errorMessage,
   hidePhaseProgress = false,
@@ -240,28 +237,6 @@ export function ReconLogsDrawer({
           </button>
         </div>
       </div>
-
-      {/* Phase progress (hidden for single-phase partial recon) */}
-      {!hidePhaseProgress && (
-        <div className={styles.phaseProgress}>
-          {phases.map((phase, index) => {
-            const phaseNum = index + 1
-            const isActive = currentPhaseNumber === phaseNum
-            const isCompleted = currentPhaseNumber !== null && phaseNum < currentPhaseNumber
-            const isPending = currentPhaseNumber === null || phaseNum > currentPhaseNumber
-
-            return (
-              <div
-                key={phase}
-                className={`${styles.phaseItem} ${isActive ? styles.phaseActive : ''} ${isCompleted ? styles.phaseCompleted : ''} ${isPending ? styles.phasePending : ''}`}
-                title={phase}
-              >
-                <span className={styles.phaseNumber}>{phaseNum}</span>
-              </div>
-            )
-          })}
-        </div>
-      )}
 
       {/* Logs container */}
       <div

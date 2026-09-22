@@ -131,11 +131,44 @@ class TestScope:
         # would have no scope at all and never attach auth.
         scope = default_scope_hosts({
             'TARGET_DOMAIN': '',
-            'DOMAIN_BATCH_GROUPS': [{'rootDomain': 'a.test'}, {'rootDomain': 'b.test'}],
+            'DOMAIN_BATCH_GROUPS': [
+                {'rootDomain': 'a.test', 'prefixes': ['*']},
+                {'rootDomain': 'b.test', 'prefixes': ['.']},
+            ],
         })
         assert host_in_scope('app.a.test', scope)
         assert host_in_scope('b.test', scope)
         assert not host_in_scope('c.test', scope)
+
+    def test_batch_scope_is_per_group_not_per_root(self):
+        # The operator's session credentials attach to everything in scope, so a
+        # LITERAL group gets exactly the hosts it named — never `*.<root>`.
+        # Blanket-wildcarding every batch root was harmless only while a batch
+        # could not discover anything; a wildcard group makes it live, and would
+        # hand the session to thousands of names the operator never listed.
+        scope = default_scope_hosts({
+            'TARGET_DOMAIN': '',
+            'DOMAIN_BATCH_GROUPS': [
+                {'rootDomain': 'lit.test', 'prefixes': ['api.']},
+                {'rootDomain': 'wild.test', 'prefixes': ['*']},
+            ],
+        })
+        assert host_in_scope('api.lit.test', scope)
+        # The literal group named one host. Its siblings are NOT in scope.
+        assert not host_in_scope('admin.lit.test', scope)
+        assert not host_in_scope('lit.test', scope)
+        # The wildcard group asked for the whole domain, so it gets it.
+        assert host_in_scope('wild.test', scope)
+        assert host_in_scope('anything.wild.test', scope)
+
+    def test_literal_batch_group_includes_the_apex_only_via_the_dot_sentinel(self):
+        scope = default_scope_hosts({
+            'TARGET_DOMAIN': '',
+            'DOMAIN_BATCH_GROUPS': [{'rootDomain': 'lit.test', 'prefixes': ['.', 'api.']}],
+        })
+        assert host_in_scope('lit.test', scope)
+        assert host_in_scope('api.lit.test', scope)
+        assert not host_in_scope('other.lit.test', scope)
 
     def test_default_scope_ip_mode(self):
         s = {'IP_MODE': True, 'TARGET_IPS': ['10.0.0.5', '10.1.0.0/24'], 'TARGET_DOMAIN': 'ignored.test'}

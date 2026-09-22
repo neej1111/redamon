@@ -669,7 +669,7 @@ afterwards, and all three run the **same** pipeline.
 | --- | --- | --- |
 | **Single Domain** | one root domain plus optional subdomain prefixes | the default; full OSINT and subdomain discovery are available |
 | **IP / CIDR** | a list of addresses or ranges | skips domain ownership, subdomain enumeration and domain WHOIS; runs reverse DNS and IP WHOIS instead |
-| **Domain batch** | a list of hostnames spanning several domains | groups them by domain and scans each group in turn, in one run |
+| **Domain batch** | a list of hostnames spanning several domains | groups them by domain and scans each group in turn, in one run; a `*.example.com` entry enumerates that domain instead of scanning it literally |
 
 ### Domain batch
 
@@ -683,6 +683,23 @@ single-domain form (target = the domain, everything else = subdomain prefixes),
 so a batch and a hand-built project scan identically. The consequence worth
 knowing is that `foo.example.co.uk` groups under `co.uk`. The project form shows
 the computed groups before you save, so the grouping is never a surprise.
+
+**A `*` entry enumerates that domain.** `*.example.com` (or `*example.com`) is
+the one way to run subdomain discovery inside a batch: that group takes the same
+FULL DISCOVERY path a single-domain project takes, and every other group in the
+same run still scans exactly the hostnames it was given. The decision is per
+group, carried as a `*` sentinel in the group's prefix list beside the existing
+`.` ("the root domain itself"); the settings toggle can only say whether
+enumeration is permitted at all.
+
+Because a wildcard turns a naive registrable domain into a scan boundary, it is
+the one place the last-two-labels rule is NOT good enough: `*.co.uk` would mean
+"enumerate a public suffix", so a wildcard is refused on any multi-label suffix
+and on any name below the registrable domain. Literal entries keep the quirk.
+
+A wildcard group discovers hosts the list never names, so `MAX_BATCH_HOSTS` and
+`MAX_BATCH_GROUPS` stop bounding the run's length. The preview badges the group,
+the form warns, and the start-scan dialog repeats the count.
 
 ```
 sub1.domain1.com          Group 1  domain1.com      sub1

@@ -33,7 +33,7 @@
  */
 import prisma from '@/lib/prisma'
 import { writeAudit } from '@/lib/audit'
-import { validateDomainBatch, MAX_BATCH_HOSTS } from '@/lib/domainBatch'
+import { validateDomainBatch, splitWildcard, MAX_BATCH_HOSTS } from '@/lib/domainBatch'
 import {
   currentAuthorization,
   describeEngagement,
@@ -259,7 +259,9 @@ export async function createProject(ctx: McpContext, args: CreateProjectArgs) {
   }
 
   if (mode === 'targetDomain') {
-    data.targetDomain = args.targetDomain!.trim()
+    // Same normalization as the HTTP routes: an agent that emits bug-bounty
+    // scope notation must not turn `*.example.com` into a literal target.
+    data.targetDomain = splitWildcard(args.targetDomain!.trim()).rest
   } else if (mode === 'targetIps') {
     data.ipMode = true
     data.targetIps = args.targetIps!.map(s => s.trim()).filter(Boolean)
@@ -523,7 +525,10 @@ export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { ...reconSettingsSelect(), id: true, updatedAt: true },
+    // domainBatchGroups explicitly: it is `mcp: never`, so it may not be in the
+    // settings select, and the derived shape below is read from it. It is never
+    // returned raw - only the two sentinel booleans are.
+    select: { ...reconSettingsSelect(), id: true, updatedAt: true, domainBatchGroups: true },
   })
   if (!project) throw new McpToolError('Project not found', 'not_found')
 
@@ -613,6 +618,22 @@ export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
       targetIps: row.targetIps ?? [],
       domainBatchMode: row.domainBatchMode ?? false,
       domainBatchHosts: row.domainBatchHosts ?? [],
+      // The DERIVED shape of each group, so a caller can verify what the list
+      // actually means instead of re-implementing the rule. `wildcard` and
+      // `includesRoot` are the two sentinels ('*' and '.') the pipeline reads;
+      // neither is a column, and domainBatchGroups itself is never exposed, so
+      // this is the only place the answer is readable.
+      domainBatchGroupShape: (Array.isArray(row.domainBatchGroups) ? row.domainBatchGroups : [])
+        .map(g => {
+          const grp = g as { rootDomain?: string; prefixes?: string[] }
+          const prefixes = grp?.prefixes ?? []
+          return {
+            rootDomain: String(grp?.rootDomain ?? ''),
+            wildcard: prefixes.includes('*'),
+            includesRoot: prefixes.includes('.'),
+            hostCount: prefixes.filter(x => x !== '*' && x !== '.').length,
+          }
+        }),
       ipMode: row.ipMode ?? false,
       targetGuardrailEnabled: row.targetGuardrailEnabled ?? false,
       excludedHosts: row.roeExcludedHosts ?? [],

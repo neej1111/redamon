@@ -1130,6 +1130,29 @@ def _fetch_urlscan_api_key(user_id: str, webapp_url: str) -> str:
 _BATCH_HOST_CHARSET = re.compile(r'^[a-z0-9.-]+$')
 
 
+def _is_public_suffix(root: str) -> bool:
+    """Is this 'registrable domain' actually a public suffix, e.g. ``co.uk``?
+
+    The batch grouping rule is last-two-labels, so ``acme.co.uk`` reduces to
+    ``co.uk``. Harmless for a literal group (it still scans only the host that
+    was listed) and NOT harmless for a wildcard one.
+
+    Imported lazily from origin_discovery, which owns the curated list for the
+    same reason: a module-level import would pull a scan module into the settings
+    layer, and this is the only place that needs it.
+    """
+    try:
+        from recon.main_recon_modules.origin_discovery import _MULTI_LABEL_SUFFIXES
+    except Exception as e:  # noqa: BLE001 - a missing list must not admit the wildcard
+        # Fail closed, but never silently: this answer demotes EVERY wildcard in
+        # the run to a literal scan, which looks like a working scan that simply
+        # found less.
+        print(f"[!][settings] public-suffix list unavailable ({e}); treating every "
+              f"wildcard root as a public suffix, so no group will enumerate.")
+        return True
+    return root in _MULTI_LABEL_SUFFIXES
+
+
 def _parse_domain_batch_groups(raw: Any) -> list[dict[str, Any]]:
     """Parse and RE-VALIDATE the webapp's derived domain-batch groups.
 
@@ -1157,13 +1180,27 @@ def _parse_domain_batch_groups(raw: Any) -> list[dict[str, Any]]:
             p.strip().lower() for p in (entry.get('prefixes') or [])
             if isinstance(p, str) and p.strip()
         ]
-        # '.' is the sentinel for "the root domain itself" (see parse_target).
+        # Two sentinels, neither of which is a hostname: '.' is "the root domain
+        # itself" and '*' is "enumerate this domain" (see parse_target). Both are
+        # matched EXACTLY, so the charset below stays free of metacharacters and
+        # a '*' anywhere other than a whole prefix is still dropped.
         prefixes = [
             p for p in prefixes
-            if p == '.' or (_BATCH_HOST_CHARSET.match(p) and '..' not in p)
+            if p in ('.', '*') or (_BATCH_HOST_CHARSET.match(p) and '..' not in p)
         ]
         if not prefixes:
             continue
+        # A wildcard on a public suffix would enumerate every subdomain of, say,
+        # co.uk. The webapp already refuses it, but scope is re-derived here for
+        # rows that never went through the form, so it is refused here too — by
+        # demoting the group to literal rather than dropping it, because dropping
+        # it would silently shrink a scope the operator can see in the preview.
+        if '*' in prefixes and _is_public_suffix(root):
+            prefixes = [p for p in prefixes if p != '*']
+            print(f"[!][settings] '{root}' is a public suffix; wildcard ignored "
+                  f"for that group (it would enumerate the whole suffix).")
+            if not prefixes:
+                continue
         groups.append({'rootDomain': root, 'prefixes': prefixes})
 
     return groups
@@ -1725,13 +1762,19 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     # Subdomain Discovery Tool Toggles
     settings['SUBDOMAIN_DISCOVERY_ENABLED'] = project.get('subdomainDiscoveryEnabled', DEFAULT_SETTINGS['SUBDOMAIN_DISCOVERY_ENABLED'])
     if settings['DOMAIN_BATCH_MODE'] and settings['DOMAIN_BATCH_GROUPS']:
-        # Domain batch scans EXACTLY the uploaded hostnames. This is not a nicety:
-        # a group made of one bare root domain yields prefixes ['.'], and
-        # parse_target() treats a '.'-only list as NOT filtered mode, which would
-        # silently start full subdomain enumeration for that domain. Forcing the
-        # toggle off here (rather than in main.py) keeps every reader agreeing,
-        # including modules that call get_settings() again mid-run.
-        settings['SUBDOMAIN_DISCOVERY_ENABLED'] = False
+        # Domain batch scans EXACTLY the uploaded hostnames, UNLESS the operator
+        # wrote a wildcard. This is not a nicety: a group made of one bare root
+        # domain yields prefixes ['.'], and parse_target() treats a '.'-only list
+        # as NOT filtered mode, which would silently start full subdomain
+        # enumeration for that domain.
+        #
+        # The toggle is a run-wide scalar and wildcard-ness is per group, so this
+        # can only answer "may ANY group enumerate". The per-group decision lives
+        # in run_domain_group(), which is the only place that sees one group's
+        # prefixes; a batch with no wildcard at all resolves exactly as before.
+        if not any('*' in (g.get('prefixes') or [])
+                   for g in settings['DOMAIN_BATCH_GROUPS']):
+            settings['SUBDOMAIN_DISCOVERY_ENABLED'] = False
     settings['DOMAIN_RECON_AI_TXT_HINT_ENABLED'] = project.get('domainReconAiTxtHintEnabled', DEFAULT_SETTINGS['DOMAIN_RECON_AI_TXT_HINT_ENABLED'])
     settings['DOMAIN_RECON_AI_NS_HINT_ENABLED'] = project.get('domainReconAiNsHintEnabled', DEFAULT_SETTINGS['DOMAIN_RECON_AI_NS_HINT_ENABLED'])
     settings['CRTSH_ENABLED'] = project.get('crtshEnabled', DEFAULT_SETTINGS['CRTSH_ENABLED'])

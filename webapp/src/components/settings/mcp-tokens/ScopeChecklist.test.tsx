@@ -10,11 +10,11 @@
  * Run: npx vitest run src/components/settings/mcp-tokens/ScopeChecklist.test.tsx
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 
 import { MCP_SCOPES, type McpScope } from '@/lib/mcpAuth'
 import { PROFILE_IDS, PROFILES, scopesForProfile } from '@/lib/mcp/profiles'
-import { SCOPE_GROUPS } from '@/lib/mcp/scopeCopy'
+import { MCP_SCOPE_COPY, SCOPE_GROUPS } from '@/lib/mcp/scopeCopy'
 import ScopeChecklist from './ScopeChecklist'
 
 afterEach(() => cleanup())
@@ -58,6 +58,28 @@ describe('the grouping', () => {
     const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
     expect(boxes).toHaveLength(MCP_SCOPES.length)
     expect(boxes.every(b => b.disabled)).toBe(true)
+  })
+})
+
+describe('the access badge', () => {
+  /**
+   * Whether a permission changes state used to be carried by tinting the row
+   * red, which said "be careful" without saying of what, and left the other
+   * rows saying nothing at all. Every row now states it.
+   */
+  const BADGE = { read: 'read', write: 'write', 'read-write': 'read + write' } as const
+
+  test('every row says whether it reads, writes, or both', () => {
+    render(<ScopeChecklist selected={[]} onToggle={vi.fn()} />)
+    for (const scope of MCP_SCOPES) {
+      const row = boxFor(scope).closest('label') as HTMLElement
+      const badge = BADGE[MCP_SCOPE_COPY[scope].access]
+      // An exact match, so the blurb's own prose cannot stand in for the badge.
+      expect(
+        within(row).getAllByText(badge, { exact: true }),
+        `${scope} does not badge "${badge}"`
+      ).toHaveLength(1)
+    }
   })
 })
 

@@ -18,6 +18,9 @@ const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Proget
 const GVM_OUTPUT_PATH = process.env.GVM_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/gvm_scan/output'
 const GITHUB_HUNT_OUTPUT_PATH = process.env.GITHUB_HUNT_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/github_secret_hunt/output'
 
+// Agent API, for the soft (LLM) guardrail on a scope edit. Mirrors the POST route.
+const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:8080'
+
 // Recon orchestrator URL for file deletion
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
 
@@ -153,7 +156,11 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     // Sanitize string inputs that are used as hostnames/IPs (trailing spaces break DNS)
     if (typeof updateData.targetDomain === 'string') {
-      updateData.targetDomain = updateData.targetDomain.trim()
+      // Strip a leading wildcard for the same reason POST does: in single-domain
+      // mode `*.example.com` already means what an empty prefix list means, and
+      // left intact the star reaches tool arguments, filenames and the graph.
+      const { splitWildcard } = await import('@/lib/domainBatch')
+      updateData.targetDomain = splitWildcard(updateData.targetDomain.trim()).rest
     }
     if (Array.isArray(updateData.subdomainList)) {
       updateData.subdomainList = updateData.subdomainList.map((s: string) => s.trim()).filter(Boolean)
@@ -171,11 +178,18 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // present on every single-domain and IP project too. Validating on presence
     // rejected all of those with "Domain batch mode needs at least one hostname"
     // and made every project edit fail.
+    // Read the row ONCE: the mode decides whether to re-derive, and the stored
+    // groups + owner are what the guardrails below compare against.
+    const existing = await prisma.project.findUnique({
+      where: { id },
+      select: {
+        domainBatchMode: true, domainBatchGroups: true,
+        userId: true, targetGuardrailEnabled: true,
+      },
+    })
     const willBeBatch = 'domainBatchMode' in updateData
       ? updateData.domainBatchMode === true
-      : (await prisma.project.findUnique({
-          where: { id }, select: { domainBatchMode: true },
-        }))?.domainBatchMode === true
+      : existing?.domainBatchMode === true
 
     // A client-supplied grouping is never trusted; it is always re-derived below.
     if ('domainBatchGroups' in updateData) delete updateData.domainBatchGroups
@@ -186,6 +200,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // untouched. Without this guard the absent domainBatchHosts read as empty and
     // every field toggle on a batch project 400'd with "needs at least one hostname".
     const touchesBatchScope = 'domainBatchHosts' in updateData || 'domainBatchMode' in updateData
+    let batchRootsAdded: string[] = []
     if (willBeBatch && touchesBatchScope) {
       const { validateDomainBatch } = await import('@/lib/domainBatch')
       const raw = updateData.domainBatchHosts
@@ -196,8 +211,81 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       if (!batch.ok) {
         return NextResponse.json({ error: batch.errors.join(' ') }, { status: 400 })
       }
+      const nextRoots = batch.groups.map(g => g.rootDomain)
+      // Compare the whole derived shape, not just the roots. Turning
+      // `api.example.com` into `*.example.com` leaves the root set identical
+      // while changing that group from "one host" to "every host under this
+      // domain" - the largest widening this feature permits, and the one a
+      // root-only comparison waves straight through.
+      const signature = (gs: Array<{ rootDomain?: string; prefixes?: string[] }>) =>
+        gs.map(g => `${String(g?.rootDomain || '')}|${[...(g?.prefixes || [])].sort().join(',')}`)
+          .sort().join(';')
+      const scopeChanged = signature(batch.groups) !== signature(
+        Array.isArray(existing?.domainBatchGroups)
+          ? existing.domainBatchGroups as Array<{ rootDomain?: string; prefixes?: string[] }>
+          : []
+      )
+
+      if (scopeChanged) {
+        // The container reads its settings ONCE at spawn, so this edit cannot
+        // re-point a running scan - but it DOES re-point everything that reads
+        // scope live from the row (the agent, the next guardrail, the report)
+        // while the graph still holds the running scan's results. Refuse rather
+        // than leave the two describing different engagements.
+        const { describeScanWriters } = await import('@/lib/graphWriters')
+        const busy = await describeScanWriters(id)
+        if (busy) {
+          return NextResponse.json(
+            { error: `Cannot change the hostname list while ${busy}. Stop the scan, or wait for it to finish, and try again.` },
+            { status: 409 },
+          )
+        }
+
+        // Every root this project would scan gets the non-disableable check.
+        // POST does this at creation; without it here, the one path that can add
+        // a root after creation is the one path that never guardrails it.
+        const { isHardBlockedDomain } = await import('@/lib/hard-guardrail')
+        for (const domain of nextRoots) {
+          const hardCheck = isHardBlockedDomain(domain)
+          if (hardCheck.blocked) {
+            return NextResponse.json(
+              { error: `Target permanently blocked: ${domain}: ${hardCheck.reason}` },
+              { status: 403 },
+            )
+          }
+        }
+
+        // Soft (LLM) guardrail, mirroring POST. Fails OPEN like POST does: an
+        // unreachable agent must not block an edit, because the hard guardrail
+        // above is the control that may not be bypassed.
+        if (existing?.targetGuardrailEnabled !== false) {
+          try {
+            const guardrailResponse = await fetch(`${AGENT_API_URL}/guardrail/check-target`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                target_domain: '', target_domains: nextRoots,
+                target_ips: [], user_id: existing?.userId ?? eff.userId,
+              }),
+            })
+            if (guardrailResponse.ok) {
+              const verdict = await guardrailResponse.json()
+              if (verdict?.blocked) {
+                return NextResponse.json(
+                  { error: verdict.reason || 'Target blocked by the guardrail.' },
+                  { status: 403 },
+                )
+              }
+            }
+          } catch (e) {
+            console.warn('[projects PUT] soft guardrail unreachable, allowing:', e)
+          }
+        }
+      }
+
       updateData.domainBatchHosts = batch.groups.flatMap(g => g.hosts)
       updateData.domainBatchGroups = batch.groups
+      batchRootsAdded = nextRoots
     }
 
     // Mutually exclusive modes, enforced on update as well as create: recon checks
@@ -288,16 +376,27 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Ensure Domain node exists in Neo4j (create if missing, update if domain changed)
-    if (!project.ipMode && project.targetDomain) {
+    // Ensure Domain node(s) exist in Neo4j (create if missing, update if changed).
+    // A batch project has an empty targetDomain and one root per group, so the
+    // single-domain condition skipped it entirely: a root added on edit had no
+    // Domain node, and the partial-recon picker (which lists Domain nodes) could
+    // never offer it.
+    const seedDomains = project.ipMode
+      ? []
+      : project.domainBatchMode
+        ? batchRootsAdded
+        : (project.targetDomain ? [project.targetDomain] : [])
+    if (seedDomains.length > 0) {
       try {
         const session = getGraphSession()
         try {
-          await session.run(
-            `MERGE (d:Domain {name: $name, user_id: $userId, project_id: $projectId})
-             ON CREATE SET d.source = 'project_creation', d.updated_at = datetime()`,
-            { name: project.targetDomain, userId: project.userId, projectId: project.id }
-          )
+          for (const name of seedDomains) {
+            await session.run(
+              `MERGE (d:Domain {name: $name, user_id: $userId, project_id: $projectId})
+               ON CREATE SET d.source = 'project_creation', d.updated_at = datetime()`,
+              { name, userId: project.userId, projectId: project.id }
+            )
+          }
         } finally {
           await session.close()
         }

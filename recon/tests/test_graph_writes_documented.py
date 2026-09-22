@@ -202,3 +202,79 @@ if __name__ == "__main__":
     print()
     print(f"{passed} passed, {len(failures)} failed")
     sys.exit(1 if failures else 0)
+
+
+# ---------------------------------------------------------------------------
+# Properties applied via `SET n += $props`
+# ---------------------------------------------------------------------------
+# The scan above reads property names out of the Cypher text, so it cannot see a
+# property whose name only ever exists as a dict key in Python. `wildcard_mode`
+# is one of those: removing its line from schema_sections.md leaves every test
+# above green. It is load-bearing - it is the only thing distinguishing "this
+# Domain was enumerated" from "this Domain was scanned as listed" - so it gets a
+# behavioural test of its own.
+
+class _FakeSession:
+    """Captures every Cypher call instead of running it."""
+
+    def __init__(self, sink):
+        self.sink = sink
+
+    def run(self, query, **params):
+        self.sink.append((query, params))
+        return []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeDriver:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def session(self):
+        return _FakeSession(self.sink)
+
+
+def _domain_props_for(metadata_extra: dict) -> dict:
+    """Run the real mixin against a fake driver and return the Domain props."""
+    from graph_db.mixins.recon.domain_mixin import DomainMixin
+
+    class _Client(DomainMixin):
+        def __init__(self, sink):
+            self.driver = _FakeDriver(sink)
+
+    sink: list = []
+    recon_data = {
+        "metadata": {"root_domain": "example.com", "target": "example.com",
+                     **metadata_extra},
+        "whois": {}, "subdomains": [], "dns": {},
+    }
+    _Client(sink).update_graph_from_domain_discovery(recon_data, "u1", "p1")
+    for query, params in sink:
+        if "MERGE (d:Domain" in query:
+            return params["props"]
+    raise AssertionError("the Domain MERGE never ran")
+
+
+def test_wildcard_mode_is_written_onto_the_domain_node():
+    # A mixed batch writes both values in one run, so the flag has to travel from
+    # the recon metadata onto the node rather than being inferred later.
+    assert _domain_props_for({"wildcard_mode": True})["wildcard_mode"] is True
+    assert _domain_props_for({"wildcard_mode": False})["wildcard_mode"] is False
+
+
+def test_wildcard_mode_defaults_to_false_for_older_recon_files():
+    # A recon file written before this feature has no such key. It must read as
+    # "not enumerated" rather than raising or writing None.
+    assert _domain_props_for({})["wildcard_mode"] is False
+
+
+def test_wildcard_mode_is_declared_in_the_schema():
+    # Declared in ONE place; schema_catalog.py is generated from it.
+    sections = (PROJECT_ROOT / "graph_db" / "schema_sections.md").read_text()
+    domain_block = sections.split("**Domain**", 1)[1].split("**Subdomain**", 1)[0]
+    assert "wildcard_mode" in domain_block

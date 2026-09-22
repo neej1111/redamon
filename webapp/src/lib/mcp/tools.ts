@@ -109,6 +109,10 @@ export async function listProjects(ctx: McpContext) {
   const select = {
     id: true, name: true, targetDomain: true, targetIps: true,
     ipMode: true, domainBatchMode: true, updatedAt: true,
+    // The groups themselves are internal, but whether any of them enumerates is
+    // the difference between a five-host scan and a multi-hour one, so a caller
+    // choosing a project needs it. Reduced to a count below; never returned raw.
+    domainBatchGroups: true,
   }
   assertReadableSelect(select, 'list_projects')
 
@@ -119,7 +123,15 @@ export async function listProjects(ctx: McpContext) {
     select,
     orderBy: { updatedAt: 'desc' },
   })
-  return { projects }
+  return {
+    projects: projects.map(({ domainBatchGroups, ...p }) => ({
+      ...p,
+      wildcardDomainCount: Array.isArray(domainBatchGroups)
+        ? (domainBatchGroups as Array<{ prefixes?: string[] }>)
+            .filter(g => (g?.prefixes || []).includes('*')).length
+        : 0,
+    })),
+  }
 }
 
 export async function getReconStatus(ctx: McpContext, projectId: string) {

@@ -7,7 +7,7 @@ import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import { isHardBlockedDomain } from '@/lib/hard-guardrail'
 import { classifyIpTargets } from '@/lib/ip-target-utils'
-import { validateDomainBatch, MAX_BATCH_HOSTS, MAX_BATCH_GROUPS } from '@/lib/domainBatch'
+import { validateDomainBatch, MAX_BATCH_HOSTS, MAX_BATCH_GROUPS, ROOT_DOMAIN_PREFIX } from '@/lib/domainBatch'
 import { deriveRoeEnabled } from '@/lib/engagement'
 import { FileImportButton } from '../FileImportButton'
 import { ModelPicker } from '@/components/shared/ModelPicker'
@@ -147,6 +147,13 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
     return null
   }, [batchResult])
 
+  // Nothing caps how many domains may be enumerated, so the count is what the
+  // operator is shown instead - here, and again in the start-scan confirmation.
+  const wildcardGroupCount = useMemo(
+    () => (batchResult?.groups ?? []).filter(g => g.wildcard).length,
+    [batchResult]
+  )
+
   // Check if root domain is included in the list
   const includesRootDomain = useMemo(() => data.subdomainList.includes('.'), [data.subdomainList])
 
@@ -235,6 +242,17 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
   const handleBatchHostsChange = (text: string) => {
     setBatchHostDraft(text)
     updateField('domainBatchHosts', parseHostList(text))
+  }
+
+  // "Also scan the domain itself" for ONE wildcard group. Root inclusion is per
+  // domain, so this cannot be a single switch: a list may hold `*.a.com` with
+  // its root in scope and `*.b.com` without. It stays pure sugar over the host
+  // list - the bare root line IS how a batch already asks for the apex - so
+  // there is no extra state to persist and the textarea keeps showing the truth.
+  const handleGroupRootToggle = (rootDomain: string, checked: boolean) => {
+    setBatchHostDraft(null)
+    const withoutRoot = batchHosts.filter(h => h.trim().toLowerCase() !== rootDomain)
+    updateField('domainBatchHosts', checked ? [...withoutRoot, rootDomain] : withoutRoot)
   }
 
   return (
@@ -343,7 +361,11 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                   (<strong>the last two labels</strong>, so a.b.example.com belongs to
                   example.com) and each group is scanned in turn by a <strong>single</strong>{' '}
                   recon run, writing to the graph as it finishes each one. Only the hostnames
-                  you list are scanned; no subdomain discovery is run.
+                  you list are scanned &mdash; <strong>except wildcards</strong>. Write{' '}
+                  <code>*.example.com</code> (or <code>*example.com</code>) to run the full
+                  subdomain enumeration for example.com, exactly as a Single Domain project
+                  does; every other line is still scanned literally. Tick{' '}
+                  <strong>Root</strong> on a wildcard row to scan the domain itself as well.
                 </>
               ) : ipMode ? (
                 <>
@@ -432,17 +454,14 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                   rows={6}
                   value={displayBatchHosts}
                   onChange={(e) => handleBatchHostsChange(e.target.value)}
-                  placeholder={'sub1.domain1.com\nsub2.domain2.it\nsub3.domain3.com\nsuba.sub3.domain3.com'}
-                  disabled={isLocked}
-                  title={isLocked ? 'The hostname list cannot be changed after creation. Create a new project instead.' : undefined}
+                  placeholder={'sub1.domain1.com\nsub2.domain2.it\n*.domain3.com\nsuba.sub3.domain4.com'}
+                  title={'The next scan rebuilds the graph against this list.'}
                 />
-                {!isLocked && (
-                  <FileImportButton
-                    onImport={(values) => { setBatchHostDraft(null); updateField('domainBatchHosts', values) }}
-                    variant="textarea"
-                    fieldName="hostnames"
-                  />
-                )}
+                <FileImportButton
+                  onImport={(values) => { setBatchHostDraft(null); updateField('domainBatchHosts', values) }}
+                  variant="textarea"
+                  fieldName="hostnames"
+                />
               </div>
               <p className={styles.fieldHint}>
                 One per line, or comma separated. {batchHosts.length} hostname
@@ -459,6 +478,7 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                         <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>#</th>
                         <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>Domain</th>
                         <th style={{ padding: '6px 8px' }}>Hosts</th>
+                        <th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>Root</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -467,7 +487,30 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                           <td style={{ padding: '6px 8px', color: 'var(--text-tertiary, #6b7280)' }}>{i + 1}</td>
                           <td style={{ padding: '6px 8px', fontWeight: 600, whiteSpace: 'nowrap' }}>{g.rootDomain}</td>
                           <td style={{ padding: '6px 8px', color: 'var(--text-secondary, #9ca3af)' }}>
+                            {g.wildcard && (
+                              <span style={{
+                                display: 'inline-block', marginRight: '6px', padding: '1px 6px',
+                                borderRadius: '10px', fontSize: '10px', fontWeight: 700,
+                                letterSpacing: '0.02em', whiteSpace: 'nowrap',
+                                color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.5)',
+                                background: 'rgba(245, 158, 11, 0.12)',
+                              }}>FULL ENUMERATION</span>
+                            )}
                             {g.hosts.join(', ')}
+                          </td>
+                          <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                            {g.wildcard ? (
+                              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={g.prefixes.includes(ROOT_DOMAIN_PREFIX)}
+                                  onChange={(e) => handleGroupRootToggle(g.rootDomain, e.target.checked)}
+                                  aria-label={`Also scan ${g.rootDomain} itself`}
+                                />
+                              </label>
+                            ) : (
+                              <span style={{ color: 'var(--text-tertiary, #6b7280)' }}>&ndash;</span>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -476,6 +519,22 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                   <p className={styles.fieldHint} style={{ marginTop: 'var(--space-2)' }}>
                     Groups run top to bottom, one at a time, in a single scan.
                   </p>
+                  {wildcardGroupCount > 0 && (
+                    <div className={styles.shodanWarning} style={{ borderColor: 'rgba(245, 158, 11, 0.4)', background: 'rgba(245, 158, 11, 0.08)' }}>
+                      <AlertTriangle size={14} style={{ color: '#f59e0b' }} />
+                      <span>
+                        <strong>
+                          {wildcardGroupCount} domain{wildcardGroupCount === 1 ? '' : 's'} will be
+                          fully enumerated.
+                        </strong>{' '}
+                        Subdomain discovery runs for {wildcardGroupCount === 1 ? 'it' : 'each of them'}{' '}
+                        (crt.sh, Subfinder, Amass, Knockpy, puredns) and the whole pipeline then runs
+                        over everything found, so this scan may take <strong>many hours</strong> and
+                        will grow the graph substantially. The hostname and domain limits count the
+                        list you typed, not what enumeration discovers.
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -485,7 +544,11 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                   <span>
                     <strong>Not valid hostnames:</strong> {batchResult.invalid.join(', ')}. Each
                     entry needs at least two labels (example.com) and may only
-                    contain letters, digits, dots and hyphens. Remove or correct them to continue.
+                    contain letters, digits, dots and hyphens. A wildcard is written{' '}
+                    <code>*.example.com</code> or <code>*example.com</code> and must name a
+                    registrable domain &mdash; not a deeper name like{' '}
+                    <code>*.sub.example.com</code>, and not a public suffix like{' '}
+                    <code>*.co.uk</code>. Remove or correct them to continue.
                   </span>
                 </div>
               )}

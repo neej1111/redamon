@@ -664,8 +664,15 @@ function renderScope(data: ReportData, narrative?: string): string {
   // derived group roots, so without this branch the client-facing deliverable
   // would state its scope as "N/A".
   const batchRoots: string[] = isBatchMode
-    ? ((project.domainBatchGroups as Array<{ rootDomain?: string }> | null) || [])
-        .map(g => String(g?.rootDomain || '')).filter(Boolean)
+    ? ((project.domainBatchGroups as Array<{ rootDomain?: string; prefixes?: string[] }> | null) || [])
+        // A wildcard group was enumerated; a literal one was scanned as listed.
+        // Stating both as a bare domain overstates the scope of one and
+        // understates the other, in the document the client reads.
+        .map(g => {
+          const root = String(g?.rootDomain || '')
+          return (g?.prefixes || []).includes('*') ? `${root} (enumerated)` : root
+        })
+        .filter(v => v && v !== ' (enumerated)')
     : []
 
   const targetRow = isIpMode

@@ -164,57 +164,6 @@
   color: var(--status-error);
 }
 
-/* Phase progress */
-.phaseProgress {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-default);
-  flex-shrink: 0;
-}
-
-.phaseItem {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-default);
-  border-radius: 50%;
-  transition: var(--transition-all);
-}
-
-.phaseNumber {
-  font-size: 10px;
-  font-weight: var(--font-semibold);
-  color: var(--text-tertiary);
-}
-
-.phaseActive {
-  background: var(--accent-primary);
-  border-color: var(--accent-primary);
-}
-
-.phaseActive .phaseNumber {
-  color: var(--text-on-accent);
-}
-
-.phaseCompleted {
-  background: var(--status-success);
-  border-color: var(--status-success);
-}
-
-.phaseCompleted .phaseNumber {
-  color: white;
-}
-
-.phasePending {
-  opacity: 0.5;
-}
-
 /* Logs container */
 .logsContainer {
   flex: 1;

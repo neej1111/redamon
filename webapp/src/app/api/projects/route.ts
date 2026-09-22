@@ -5,7 +5,7 @@ import prisma from '@/lib/prisma'
 import { getGraphSession } from '@/app/api/graph/neo4j'
 import { isBlankModelField } from '@/components/projects/ProjectForm/projectLlmGate.logic'
 import { requireEffectiveUser, ownerScope } from '@/lib/access'
-import { validateDomainBatch } from '@/lib/domainBatch'
+import { validateDomainBatch, splitWildcard } from '@/lib/domainBatch'
 
 const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:8080'
 
@@ -313,7 +313,12 @@ export async function POST(request: NextRequest) {
         ...(clientId ? { id: clientId } : {}),
         userId,
         name: name.trim(),
-        targetDomain: (ipMode || domainBatchMode) ? '' : (targetDomain || '').trim(),
+        // A wildcard here means what an empty prefix list already means, so it is
+        // normalized rather than refused. Unstripped it would reach `subfinder -d`,
+        // the crt.sh URL, a puredns filename and a Cypher MERGE, and the in-scope
+        // test `endswith('.' + domain)` would then match nothing - a green scan
+        // that finds zero hosts.
+        targetDomain: (ipMode || domainBatchMode) ? '' : splitWildcard((targetDomain || '').trim()).rest,
         ipMode: ipMode || false,
         ...sanitizedParams,
         // After sanitizedParams so a client-supplied domainBatchGroups cannot win.

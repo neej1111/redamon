@@ -11,17 +11,28 @@
  * have to read as a SHAPE at a glance ("this token reads and scans, nothing
  * else"), which is what the group headers are for.
  *
- * `kali:exec` gets its own panel below a separator, in a third visual tier.
- * Red is already spent on the `danger` scopes inside the scan and write groups,
- * so making this louder red would not distinguish it; being a different KIND of
- * block does.
+ * Every row inside a group looks the same. Tinting the heavier permissions red
+ * made an operator decode two colour scales at once - group tier AND row
+ * weight - for a distinction the row already had to spell out in words. What a
+ * permission touches is a BADGE now: read, write, or both, derived from what
+ * its tools really do rather than from how alarming it felt.
+ *
+ * `kali:exec` still gets its own panel below a separator, because a shell on a
+ * target-facing box is a different KIND of block, not a louder one.
  */
 import { ShieldAlert, Terminal } from 'lucide-react'
 import { ExternalLink } from '@/components/ui'
 import type { McpScope } from '@/lib/mcpAuth'
-import { MCP_SCOPE_COPY as SCOPE_COPY, SCOPE_GROUPS } from '@/lib/mcp/scopeCopy'
+import { MCP_SCOPE_COPY as SCOPE_COPY, SCOPE_GROUPS, type ScopeAccess } from '@/lib/mcp/scopeCopy'
 import { PROFILES, type ProfileId } from '@/lib/mcp/profiles'
 import styles from './McpTokensTab.module.css'
+
+/** Read and write share one chip each; the point is only what changes. */
+const ACCESS_TEXT: Record<ScopeAccess, string> = {
+  read: 'read',
+  write: 'write',
+  'read-write': 'read + write',
+}
 
 interface Props {
   selected: McpScope[]
@@ -62,7 +73,6 @@ export default function ScopeChecklist({ selected, onToggle, disabled = false, p
         className={[
           styles.scopeRow,
           checked ? styles.scopeChecked : '',
-          copy.danger && tone !== 'exec' ? styles.scopeDanger : '',
           tone === 'exec' ? styles.scopeExecRow : '',
         ].filter(Boolean).join(' ')}
       >
@@ -76,6 +86,14 @@ export default function ScopeChecklist({ selected, onToggle, disabled = false, p
         <span className={styles.scopeText}>
           <span className={styles.scopeTitleRow}>
             <strong className={styles.scopeLabel}>{copy.label}</strong>
+            <span
+              className={[
+                styles.scopeAccess,
+                copy.access === 'read' ? styles.scopeAccessRead : styles.scopeAccessWrite,
+              ].join(' ')}
+            >
+              {ACCESS_TEXT[copy.access]}
+            </span>
             <code className={styles.scopeCode}>{scope}</code>
             {tag && <span className={styles.scopeTag}>{tag}</span>}
           </span>

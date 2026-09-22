@@ -66,7 +66,24 @@ export function WorkflowView({ formData, updateField, projectId, mode, onSave, o
       const subdomainList = (formData as { subdomainList?: string[] }).subdomainList ?? []
       const hasPrefixes = subdomainList.some((s) => s !== '.' && s.replace(/\.$/, '').length > 0)
       const includesRoot = subdomainList.includes('.')
-      if (!hasPrefixes && !includesRoot) {
+      // A batch leaves subdomainList empty, so the single-domain warning below
+      // would promise it an "Include Root Domain" lock that only ever applies to
+      // targetMode === 'domain'. Its own consequence is different: the wildcard
+      // groups lose the discovery they exist for.
+      const batch = (formData as { domainBatchMode?: boolean }).domainBatchMode === true
+      if (batch) {
+        const wildcards = ((formData as { domainBatchHosts?: string[] }).domainBatchHosts ?? [])
+          .filter((h) => String(h).trim().startsWith('*')).length
+        if (wildcards > 0) {
+          const ok = await confirm(
+            `You are turning off Subdomain Discovery while ${wildcards} wildcard ` +
+            `entr${wildcards === 1 ? 'y is' : 'ies are'} in the hostname list. Those groups ` +
+            'exist to be enumerated, so the scan will refuse to run them. Continue?',
+            'Disable Subdomain Discovery?'
+          )
+          if (!ok) return
+        }
+      } else if (!hasPrefixes && !includesRoot) {
         const ok = await confirm(
           'You are turning off Subdomain Discovery while no Subdomain Prefixes are set. ' +
           'To keep the pipeline runnable, "Include Root Domain" will be automatically ' +

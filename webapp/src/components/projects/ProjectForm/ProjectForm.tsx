@@ -1256,7 +1256,6 @@ export function ProjectForm({
             }
           }}
           title={`Partial Recon: ${WORKFLOW_TOOLS.find(t => t.id === activePartialLogsRun.tool_id)?.label || 'Running'}`}
-          phases={PARTIAL_RECON_PHASE_MAP[activePartialLogsRun.tool_id || ''] || ['Running']}
           totalPhases={(PARTIAL_RECON_PHASE_MAP[activePartialLogsRun.tool_id || ''] || ['Running']).length}
           hidePhaseProgress
         />

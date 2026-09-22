@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.17.0] - 2026-09-22
+
+### Added
+
+- **A Domain batch entry may now be a wildcard.** `*.example.com` (or `*example.com`) makes that one domain run the full subdomain enumeration a Single Domain project runs — crt.sh, HackerTarget, Subfinder, Amass, Knockpy, puredns — while every other line in the same list is still scanned exactly as written. Until now a batch could only scan hostnames you already knew, because subdomain discovery was force-disabled for the whole run; the decision is now per group, carried as a `*` sentinel beside the existing `.` ("the root domain itself"). Listing the bare domain next to the wildcard also scans the apex, which is what the preview's new **Root** checkbox writes. A wildcard must name a registrable domain: `*.sub.example.com` and `*.co.uk` are refused, because the batch grouping rule is last-two-labels and a wildcard on a public suffix would enumerate the whole suffix. The preview badges enumerating groups and warns that neither host cap bounds the run any more.
+- **The batch hostname list is editable after creation, in the project form only.** Adding a domain re-runs the hard and soft guardrails and seeds its `Domain` node, and the edit is refused while a scan is running. It stays `create_only` over MCP, because that same flag governs whether a parsed Rules of Engagement document may write a field — an untrusted document must never be able to re-point the platform's targets.
+- **`Domain.wildcard_mode`** records whether a domain was enumerated or scanned as listed, since `filtered_mode: false` alone cannot tell the two apart in a mixed batch.
+
+### Fixed
+
+- **A host you listed beside a wildcard is now resolved, not just listed.** Seeded hosts were re-resolved only when discovery returned nothing at all, so when enumeration succeeded but missed one, that host reached the scan file with no DNS and no IP — present, and invisible to every later phase.
+- **A crt.sh outage reads as one.** `requests` does not raise on 5xx, and the non-200 path had no branch, so a `502` (which crt.sh returns regularly) produced no log line whatsoever: the source simply vanished from the run, indistinguishable from "this domain has no certificates" or "crt.sh is switched off".
+
+### Security
+
+- **A discovered hostname can no longer drag the scanner inward.** Subdomain enumeration adopts the target owner's DNS, and `localhost.<domain> -> 127.0.0.1` is a real, common record — vulnweb.com publishes one. Nothing downstream re-checked: neither the port scan nor the HTTP probe filters addresses, so such a name was scanned. Discovered names resolving to loopback, link-local (including `169.254.169.254`), unspecified or multicast addresses are now dropped and logged. Private ranges are deliberately kept, because internal estates are a supported target; so are the apex and any host the operator typed.
+
 ## [6.16.3] - 2026-09-18
 
 ### Fixed

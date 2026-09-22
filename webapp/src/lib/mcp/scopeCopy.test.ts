@@ -10,10 +10,18 @@
 import { existsSync, readFileSync } from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, beforeAll, vi } from 'vitest'
+
+// Only tools/list is exercised here, so nothing reaches a model; these keep the
+// server importable.
+vi.mock('@/lib/prisma', () => ({ default: {} }))
+vi.mock('@/lib/audit', () => ({ writeAudit: vi.fn() }))
+
+import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 
 import { MCP_SCOPES, type McpScope } from '@/lib/mcpAuth'
-import { MCP_SCOPE_COPY, SCOPE_GROUPS } from './scopeCopy'
+import { listAdvertisedTools, toolScopes } from './apiReference'
+import { MCP_SCOPE_COPY, SCOPE_GROUPS, type ScopeAccess } from './scopeCopy'
 
 describe('the copy', () => {
   test('every scope has a label and a blurb', () => {
@@ -53,12 +61,6 @@ describe('the copy', () => {
     expect(c.detail!).toContain('not sufficient on its own')
     expect(c.detail!).not.toContain('read-only tools')
     expect(c.learnMore).toHaveLength(2)
-  })
-
-  test('it is flagged as a danger scope', () => {
-    // It is the most powerful permission on the surface; the UI must style it
-    // as such rather than as one checkbox among many.
-    expect(MCP_SCOPE_COPY['kali:exec'].danger).toBe(true)
   })
 
   test('every learnMore link points at the wiki over https', () => {
@@ -102,11 +104,14 @@ describe('the grouping', () => {
     }
   })
 
-  test('the read group changes nothing, so it carries no danger scope', () => {
+  test('the read group changes nothing, so every scope in it badges read', () => {
+    // Its header promises "Nothing here changes any state". A write scope filed
+    // under it would make that header a lie for every operator who reads the
+    // group instead of the row.
     const read = SCOPE_GROUPS.find(g => g.id === 'read')!
     expect(read.tone).toBe('neutral')
     for (const s of read.scopes) {
-      expect(MCP_SCOPE_COPY[s].danger, `${s} is a danger scope in the neutral group`).not.toBe(true)
+      expect(MCP_SCOPE_COPY[s].access, `${s} can write, in the group that says nothing does`).toBe('read')
     }
   })
 
@@ -123,6 +128,58 @@ describe('the grouping', () => {
     const flattened = SCOPE_GROUPS.flatMap(g => g.scopes)
     expect(flattened).not.toEqual([...MCP_SCOPES])
     expect([...flattened].sort()).toEqual([...MCP_SCOPES].sort() as McpScope[])
+  })
+})
+
+/**
+ * The read / write badge on each checkbox.
+ *
+ * The badge is the only place the consent screen answers "does ticking this let
+ * an agent CHANGE something" without the operator reading a paragraph, so it is
+ * derived from the live `tools/list` rather than trusted as editorial. A scope
+ * that gains a state-changing tool - or a tool that loses `readOnlyHint` - goes
+ * red here instead of quietly under-stating the permission.
+ */
+describe('the access badge matches what the tools do', () => {
+  let tools: Tool[]
+
+  beforeAll(async () => {
+    tools = await listAdvertisedTools()
+  })
+
+  /** What the tools gated by this scope actually are, required or conditional. */
+  const observed = (scope: McpScope): ScopeAccess | null => {
+    let reads = false
+    let writes = false
+    for (const t of tools) {
+      const s = toolScopes(t)
+      if (!s) continue
+      const gated = s.required.includes(scope) || (s.conditional ?? []).some(c => c.scope === scope)
+      if (!gated) continue
+      if (t.annotations?.readOnlyHint) reads = true
+      else writes = true
+    }
+    if (!reads && !writes) return null
+    if (reads && writes) return 'read-write'
+    return reads ? 'read' : 'write'
+  }
+
+  test('every scope badges what its own tools do', () => {
+    for (const scope of MCP_SCOPES) {
+      const real = observed(scope)
+      expect(real, `${scope} unlocks no tool at all`).not.toBeNull()
+      expect(
+        MCP_SCOPE_COPY[scope].access,
+        `${scope} badges "${MCP_SCOPE_COPY[scope].access}" but its tools are "${real}"`
+      ).toBe(real)
+    }
+  })
+
+  test('the shell scope is the only one that both reads and writes', () => {
+    // kali_output and kali_toolbox read; kali_exec and kali_cancel do not. Every
+    // other scope is one or the other, which is why the badge can stay one chip.
+    const both = MCP_SCOPES.filter(s => MCP_SCOPE_COPY[s].access === 'read-write')
+    expect(both).toEqual(['kali:exec'])
   })
 })
 

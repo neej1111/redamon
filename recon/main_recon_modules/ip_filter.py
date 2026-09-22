@@ -48,6 +48,42 @@ def is_non_routable_ip(ip_str: str) -> bool:
     )
 
 
+def is_never_scannable_ip(ip_str: str) -> bool:
+    """Return True for an address a DISCOVERED hostname must never drag in.
+
+    Deliberately narrower than :func:`is_non_routable_ip`. That one answers
+    "may this go to an external OSINT API", and refuses RFC-1918 as well - which
+    is correct there and wrong here, because RedAmon scans internal estates on
+    purpose (Single Domain advertises "public or internal (incl. AD)"). Dropping
+    every private address would silently break those engagements.
+
+    What is left is the set that is wrong for a SCANNER no matter whose estate
+    it is:
+
+    - loopback: the name points at the recon container itself, so scanning it
+      means scanning ourselves. `localhost.<domain> -> 127.0.0.1` is a real and
+      common record; vulnweb.com publishes one.
+    - link-local: includes 169.254.169.254, i.e. cloud metadata.
+    - unspecified / multicast: not a host.
+
+    Private and CGNAT addresses are deliberately KEPT and logged by the caller,
+    so an operator can see a discovered name pointing inward without the scan
+    quietly deciding for them.
+    """
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr.is_multicast
+    )
+
+
 def is_url_safe_to_probe(url: str) -> bool:
     """SSRF guard for probing URLs derived from a target's JavaScript (STRIDE I14).
 

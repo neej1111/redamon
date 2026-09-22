@@ -2139,7 +2139,10 @@ fields:
       hosts[] }]. Persisted rather than re-derived so the grouping rule has
       exactly ONE implementation, and so what the operator approved in the preview
       is literally what the pipeline runs. Always recomputed server-side; never
-      trusted from a body.
+      trusted from a body. A prefix is a subdomain label, or one of two
+      sentinels: "." meaning the root domain itself, and "*" meaning enumerate
+      this domain (full subdomain discovery, as a single-domain project runs it).
+      Wildcard-ness is read from the prefixes; there is no separate flag.
     form_section: null
     deny_reason: internal
     written_by: "create_project, from domainBatchHosts"
@@ -2154,7 +2157,12 @@ fields:
     validator: free_text
     group: scope
     meaning: >-
-      Raw hostname list as entered or uploaded. What the operator edits.
+      Raw hostname list as entered or uploaded. What the operator edits. An
+      entry may carry a wildcard marker - "*.example.com" or "*example.com" -
+      which makes that one domain be fully enumerated instead of scanned as
+      listed; every other entry stays literal. Editable after creation from the
+      project form only: it stays create_only over MCP, so a parsed Rules of
+      Engagement document can never re-point the platform's targets.
   domainBatchMode:
     tool: targeting
     runtime_key: "DOMAIN_BATCH_MODE"
@@ -8070,7 +8078,9 @@ fields:
       Whether Subdomain discovery runs. Configuration is two levels: this flag
       decides whether the tool runs INSIDE its phase, and scanModules decides
       whether the phase runs at all. Setting one without the other is a silent
-      no-op.
+      no-op. In a Domain batch it is narrower still: it governs only the groups
+      whose hostname carried a "*" marker, because every other group scans the
+      exact hostnames it was given whatever this flag says.
   subdomainList:
     tool: targeting
     runtime_key: "SUBDOMAIN_LIST"

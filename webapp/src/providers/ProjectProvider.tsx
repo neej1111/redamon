@@ -15,6 +15,9 @@ export interface ProjectSummary {
    *  fall back to these. */
   domainBatchMode?: boolean
   domainBatchDomains?: string[]
+  /** Subset of domainBatchDomains whose group carries the '*' sentinel,
+   *  i.e. will be fully enumerated rather than scanned as listed. */
+  domainBatchWildcardDomains?: string[]
   subdomainList?: string[]
   description?: string
   agentOpenaiModel?: string
@@ -128,6 +131,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
               domainBatchMode: project.domainBatchMode,
               domainBatchDomains: Array.isArray(project.domainBatchGroups)
                 ? (project.domainBatchGroups as Array<{ rootDomain?: string }>)
+                    .map(g => String(g?.rootDomain || '')).filter(Boolean)
+                : [],
+              domainBatchWildcardDomains: Array.isArray(project.domainBatchGroups)
+                ? (project.domainBatchGroups as Array<{ rootDomain?: string; prefixes?: string[] }>)
+                    .filter(g => (g?.prefixes || []).includes('*'))
                     .map(g => String(g?.rootDomain || '')).filter(Boolean)
                 : [],
               subdomainList: project.subdomainList,

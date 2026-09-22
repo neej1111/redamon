@@ -27,7 +27,11 @@ vi.mock('@/lib/prisma', () => ({
     },
   },
 }))
-vi.mock('@/app/api/graph/neo4j', () => ({ getGraphSession: () => ({ run: vi.fn(), close: vi.fn() }) }))
+const mockGraphSession = vi.fn(() => ({ run: vi.fn(), close: vi.fn() }))
+vi.mock('@/app/api/graph/neo4j', () => ({ getGraphSession: () => mockGraphSession() }))
+// Scope edits are refused while a scan writes the graph; default is idle.
+const mockScanWriters = vi.fn()
+vi.mock('@/lib/graphWriters', () => ({ describeScanWriters: () => mockScanWriters() }))
 vi.mock('@/lib/graphRestore', () => ({ clearProjectGraph: vi.fn() }))
 vi.mock('@/lib/orchestrator', () => ({ orchestratorFetch: vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }) }))
 vi.mock('@/lib/session', () => ({ isInternalRequest: () => false, isScannerRequest: () => false }))
@@ -77,6 +81,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockEffectiveUser.mockResolvedValue({ userId: 'u1', isAdmin: false })
   mockFindUnique.mockResolvedValue({ id: PROJECT_ID, userId: 'u1', domainBatchMode: false })
+  mockScanWriters.mockResolvedValue(null)
+  mockGraphSession.mockReturnValue({ run: vi.fn(), close: vi.fn() })
   mockUpdate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
     id: PROJECT_ID, userId: 'u1', ...data,
   }))
@@ -210,5 +216,72 @@ describe('F8: the target modes stay mutually exclusive on update', () => {
     expect((await put(fullFormBody({
       domainBatchMode: true, targetDomain: '', domainBatchHosts: ['a.example.com'],
     }))).status).toBe(200)
+  })
+})
+
+/**
+ * Batch scope became editable after creation, so this route is now the only path
+ * that can add a domain to a live engagement. POST guardrails what it creates;
+ * until these tests, PUT guardrailed nothing.
+ */
+describe('editing batch scope is guarded', () => {
+  const BATCH_ROW = {
+    id: PROJECT_ID, userId: 'u1', domainBatchMode: true,
+    targetGuardrailEnabled: false,
+    domainBatchGroups: [{ rootDomain: 'example.com', prefixes: ['api.'] }],
+  }
+
+  beforeEach(() => {
+    mockFindUnique.mockResolvedValue(BATCH_ROW)
+  })
+
+  test('a hard-blocked root added on edit is refused, and nothing is written', async () => {
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['api.example.com', 'www.senate.gov'] })
+    expect(res.status).toBe(403)
+    expect((await res.json()).error).toContain('senate.gov')
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('an unchanged host list is not treated as a scope change', async () => {
+    // A partial save (one module toggle) must not pay for a guardrail round trip
+    // or be blocked by an unrelated running scan.
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['api.example.com'] })
+    expect(res.status).toBe(200)
+  })
+
+  test('turning a literal group into a wildcard counts as a scope change', async () => {
+    // Same root, same group count - so a roots-only comparison sees no change,
+    // while the group went from one host to every host under the domain.
+    mockScanWriters.mockResolvedValue('a recon scan is running')
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['*.example.com'] })
+    expect(res.status).toBe(409)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('a scope edit during a running scan is refused', async () => {
+    mockScanWriters.mockResolvedValue('a recon scan is running')
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['api.example.com', 'new.other.com'] })
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toContain('a recon scan is running')
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('it fails closed when scan status cannot be determined', async () => {
+    mockScanWriters.mockResolvedValue('the scan status could not be verified')
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['new.other.com'] })
+    expect(res.status).toBe(409)
+  })
+
+  test('a Domain node is seeded for every batch root, not just targetDomain', async () => {
+    // targetDomain is '' for a batch, so the single-domain seed condition skipped
+    // it entirely and a root added on edit had no node for partial recon to offer.
+    const runs: string[] = []
+    mockGraphSession.mockReturnValue({
+      run: async (_q: string, p: { name: string }) => { runs.push(p.name); return [] },
+      close: async () => {},
+    } as never)
+    const res = await put({ domainBatchMode: true, domainBatchHosts: ['*.example.com', 'api.other.com'] })
+    expect(res.status).toBe(200)
+    expect(runs).toEqual(['example.com', 'other.com'])
   })
 })

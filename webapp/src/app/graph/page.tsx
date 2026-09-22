@@ -58,7 +58,7 @@ import { useProjectById } from '@/hooks/useProjects'
 import { useScanStartFailure } from '@/hooks/useScanStartFailure'
 import { useGraphTypeFilterPrefs, useGraphViewPrefs } from '@/hooks/useUserPreferences'
 import { useProject } from '@/providers/ProjectProvider'
-import { GVM_PHASES, GITHUB_HUNT_PHASES, TRUFFLEHOG_PHASES, PARTIAL_RECON_PHASE_MAP } from '@/lib/recon-types'
+import { PARTIAL_RECON_PHASE_MAP } from '@/lib/recon-types'
 import { WORKFLOW_TOOLS } from '@/components/projects/ProjectForm/WorkflowView/workflowDefinition'
 import type { ReconStatus } from '@/lib/recon-types'
 import type { ScanMode } from '@/hooks/useReconStatus'
@@ -1781,7 +1781,6 @@ export default function GraphPage() {
         onResume={handleResumeGvm}
         onStop={handleStopGvm}
         title="GVM Vulnerability Scan Logs"
-        phases={GVM_PHASES}
         totalPhases={4}
       />
 
@@ -1798,7 +1797,6 @@ export default function GraphPage() {
         onResume={handleResumeGithubHunt}
         onStop={handleStopGithubHunt}
         title="GitHub Secret Hunt Logs"
-        phases={GITHUB_HUNT_PHASES}
         totalPhases={3}
       />
 
@@ -1813,7 +1811,6 @@ export default function GraphPage() {
         onClearLogs={clearTrufflehogLogs}
         onStop={() => { if (openTrufflehogLogsSource) void handleStopTrufflehog(openTrufflehogLogsSource) }}
         title={`Secret Multiscanner Logs — ${openTrufflehogLogsSource ?? ''}`}
-        phases={TRUFFLEHOG_PHASES}
         totalPhases={3}
       />
 
@@ -1846,7 +1843,6 @@ export default function GraphPage() {
           onClearLogs={() => clearPartialReconLogsForRun(run.run_id)}
           onStop={() => handleStopPartialRecon(run.run_id)}
           title={`Partial Recon: ${WORKFLOW_TOOLS.find(t => t.id === run.tool_id)?.label || 'Running'}`}
-          phases={PARTIAL_RECON_PHASE_MAP[run.tool_id || ''] || ['Running']}
           totalPhases={(PARTIAL_RECON_PHASE_MAP[run.tool_id || ''] || ['Running']).length}
           hidePhaseProgress
         />
@@ -1889,6 +1885,7 @@ export default function GraphPage() {
         ipMode={currentProject?.ipMode}
         targetIps={currentProject?.targetIps}
         batchDomains={currentProject?.domainBatchDomains}
+        batchWildcardDomains={currentProject?.domainBatchWildcardDomains}
         stats={graphStats}
         isLoading={isReconLoading}
         currentVersionLabel={activeVersion?.label ?? null}

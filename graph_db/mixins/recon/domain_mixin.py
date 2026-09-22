@@ -66,6 +66,11 @@ class DomainMixin:
                     "scan_type": metadata.get("scan_type"),
                     "target": target,
                     "filtered_mode": filtered_mode,
+                    # Distinguishes "this domain was enumerated" from "this
+                    # domain was scanned literally". Without it, filtered_mode
+                    # False on a batch Domain node is ambiguous with an ordinary
+                    # single-domain run, and a mixed batch writes both values.
+                    "wildcard_mode": metadata.get("wildcard_mode", False),
                     "subdomain_filter": subdomain_filter,
                     "modules_executed": metadata.get("modules_executed", []),
                     "anonymous_mode": metadata.get("anonymous_mode", False),

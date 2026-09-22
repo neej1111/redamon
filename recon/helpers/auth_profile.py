@@ -203,6 +203,13 @@ def default_scope_hosts(settings: dict, extra_hosts: Iterable[str] = ()) -> List
     Residual risk, accepted deliberately: a discovered subdomain CNAME'd to a
     third party is in scope. An operator who cannot accept that sets explicit
     ``scopeHosts`` on the profile, which replaces this default entirely.
+
+    That trade is only defensible where the operator chose a ROOT and asked for
+    its subdomains. A Domain batch is per GROUP: a literal group names its hosts
+    exactly, so it gets exactly those, and only a wildcard group — where the
+    operator wrote ``*.domain.com``, i.e. "the whole domain" — gets ``*.<root>``.
+    Blanket-wildcarding every batch root would attach the operator's session to
+    thousands of discovered names they never listed.
     """
     hosts: List[str] = []
     if settings.get('IP_MODE'):
@@ -215,10 +222,22 @@ def default_scope_hosts(settings: dict, extra_hosts: Iterable[str] = ()) -> List
         # A domain-batch project leaves TARGET_DOMAIN empty and keeps its scope
         # in the derived groups; without this it would have no scope at all.
         for group in settings.get('DOMAIN_BATCH_GROUPS') or []:
-            if isinstance(group, dict):
-                g = _normalize_host(group.get('rootDomain') or '')
-                if g and g not in roots:
+            if not isinstance(group, dict):
+                continue
+            g = _normalize_host(group.get('rootDomain') or '')
+            if not g:
+                continue
+            prefixes = [p for p in (group.get('prefixes') or []) if isinstance(p, str)]
+            if '*' in prefixes:
+                # Enumerated group: the operator asked for the whole domain.
+                if g not in roots:
                     roots.append(g)
+                continue
+            # Literal group: exactly the hosts it named, and the apex only when
+            # '.' put it in scope.
+            for p in prefixes:
+                clean = p.strip().rstrip('.')
+                hosts.append(g if not clean else f"{clean}.{g}")
         for r in roots:
             hosts.append(r)
             hosts.append(f"*.{r}")

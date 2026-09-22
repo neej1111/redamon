@@ -133,3 +133,69 @@ describe('mode switching', () => {
     expect(s.data.domainBatchHosts).toEqual([])
   })
 })
+
+describe('the wildcard Root control', () => {
+  /** Renders in edit mode, where the batch list is now unlocked. */
+  function renderEdit(initial: Partial<Data> = {}) {
+    let data: Data = { ...BASE, ...initial }
+    const updateField = vi.fn((k: string, v: unknown) => { data[k] = v; rerender() })
+    const view = render(<TargetSection data={data as never} updateField={updateField as never} mode="edit" />)
+    function rerender() {
+      view.rerender(<TargetSection data={{ ...data } as never} updateField={updateField as never} mode="edit" />)
+    }
+    return { get data() { return data } }
+  }
+
+  test('ticking Root adds the bare domain to the host list', () => {
+    // Root inclusion is per wildcard domain and is expressed the way a batch
+    // already asks for an apex: the bare root appearing in the list. There is no
+    // separate field, so this checkbox IS the host list.
+    const h = renderSection({ domainBatchMode: true, domainBatchHosts: ['*.domain.com'] })
+    fireEvent.click(screen.getByLabelText(/Also scan domain\.com itself/i))
+    expect(h.data.domainBatchHosts).toContain('domain.com')
+    expect(h.data.domainBatchHosts).toContain('*.domain.com')
+  })
+
+  test('unticking Root removes it again', () => {
+    const h = renderSection({
+      domainBatchMode: true, domainBatchHosts: ['*.domain.com', 'domain.com'],
+    })
+    fireEvent.click(screen.getByLabelText(/Also scan domain\.com itself/i))
+    expect(h.data.domainBatchHosts).not.toContain('domain.com')
+    expect(h.data.domainBatchHosts).toContain('*.domain.com')
+  })
+
+  test('it is offered only on wildcard rows', () => {
+    renderSection({ domainBatchMode: true, domainBatchHosts: ['api.literal.com'] })
+    expect(screen.queryByLabelText(/Also scan/i)).toBeNull()
+  })
+
+  test('one domain\'s Root does not move another\'s', () => {
+    const h = renderSection({
+      domainBatchMode: true, domainBatchHosts: ['*.a.com', '*.b.com', 'b.com'],
+    })
+    fireEvent.click(screen.getByLabelText(/Also scan a\.com itself/i))
+    expect(h.data.domainBatchHosts).toContain('a.com')
+    expect(h.data.domainBatchHosts).toContain('b.com')
+  })
+
+  test('the batch list stays editable in edit mode', () => {
+    // The list was locked after creation, which made the whole feature
+    // unreachable for every project that already existed.
+    const h = renderEdit({ domainBatchMode: true, domainBatchHosts: ['*.domain.com'] })
+    fireEvent.click(screen.getByLabelText(/Also scan domain\.com itself/i))
+    expect(h.data.domainBatchHosts).toContain('domain.com')
+  })
+
+  test('a wildcard list warns that the run is unbounded', () => {
+    // Nothing caps wildcard count, so this warning and the badge are the only
+    // thing standing between a pasted list and a multi-hour scan.
+    renderSection({ domainBatchMode: true, domainBatchHosts: ['*.a.com', '*.b.com'] })
+    expect(screen.getByText(/2 domains will be\s+fully enumerated/i)).toBeInTheDocument()
+  })
+
+  test('a literal-only list does not warn', () => {
+    renderSection({ domainBatchMode: true, domainBatchHosts: ['api.a.com'] })
+    expect(screen.queryByText(/will be\s+fully enumerated/i)).toBeNull()
+  })
+})

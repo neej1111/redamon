@@ -109,6 +109,13 @@ def query_crtsh(domain: str, settings: dict = None) -> dict:
             print(f"[+][crt.sh] Found {len(crtsh_subs)} subdomains")
             for s in crtsh_subs:
                 sourced.setdefault(s, set()).add("crt.sh")
+        else:
+            # requests does not raise on 4xx/5xx, so without this a 502 - which
+            # crt.sh returns regularly - produced NO line at all: not a success,
+            # not an error. The source simply vanished from the run, which reads
+            # exactly like "this domain has no CT entries" or "crt.sh is off".
+            print(f"[!][crt.sh] HTTP {resp.status_code} - no results from this "
+                  f"source (it is degraded, not empty)")
     except Exception as e:
         print(f"[!][crt.sh] Error: {e}")
     finally:

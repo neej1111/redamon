@@ -425,6 +425,7 @@ export const ONBOARDING_PLAYBOOK: Record<string, PlaybookEntry> = {
       'A third_party engagement without a ceiling and an authorization record is created and then REFUSED at start_recon. Supply both here.',
       'Pass an idempotencyKey. A retried run is normal and a retry without one opens a second engagement against the same scope.',
       'The domain-batch grouping is re-derived server-side from your raw host list; anything you supply for it is discarded. The grouping decides the run order, so it is a control, not a formatting preference.',
+      'A domain-batch entry written "*.example.com" is a WILDCARD: that domain gets full subdomain enumeration, the rest of the list stays literal. It is the only way to enumerate inside a batch, and it makes the run far longer than the host count suggests.',
     ],
     workflowRefs: ['open-an-engagement'],
   },

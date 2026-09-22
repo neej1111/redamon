@@ -21,6 +21,7 @@ interface ReconConfirmModalProps {
   targetIps?: string[]
   /** Domain batch: the derived group roots, in run order. */
   batchDomains?: string[]
+  batchWildcardDomains?: string[]
   stats: GraphStats | null
   isLoading: boolean
   /** Label of the version the current graph would be saved as (Scan Timeline). */
@@ -36,6 +37,7 @@ export function ReconConfirmModal({
   ipMode,
   targetIps,
   batchDomains,
+  batchWildcardDomains,
   stats,
   isLoading,
   currentVersionLabel,
@@ -46,8 +48,16 @@ export function ReconConfirmModal({
     ? targetIps.slice(0, 5).join(', ') + (targetIps.length > 5 ? ` (+${targetIps.length - 5} more)` : '')
     : batchDomains?.length
       ? `${batchDomains.length} domain${batchDomains.length === 1 ? '' : 's'}: `
-        + batchDomains.slice(0, 5).join(', ')
+        // A wildcard group discovers hosts this list never names, so the domain
+        // count alone understates the run by orders of magnitude. This is the
+        // last screen before it starts.
+        + batchDomains.slice(0, 5)
+            .map(d => (batchWildcardDomains || []).includes(d) ? `*.${d}` : d)
+            .join(', ')
         + (batchDomains.length > 5 ? ` (+${batchDomains.length - 5} more)` : '')
+        + ((batchWildcardDomains || []).length > 0
+            ? ` — ${(batchWildcardDomains || []).length} fully enumerated (may take hours)`
+            : '')
       : targetDomain
   const hasExistingData = stats && stats.totalNodes > 0
 

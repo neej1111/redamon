@@ -1107,7 +1107,17 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         targetIps: z.array(z.string().max(64)).max(1000).optional()
           .describe('IP / CIDR mode. Mutually exclusive with the other two.'),
         domainBatchHosts: z.array(z.string().max(253)).max(500).optional()
-          .describe('Domain-batch mode: the raw host list. The server derives the grouping.'),
+          .describe('Domain-batch mode: the raw host list. The server derives the grouping. '
+            + 'An entry may be a wildcard - "*.example.com" or "*example.com" - which makes '
+            + 'that one domain be fully enumerated (subdomain discovery, as single-domain '
+            + 'mode runs it) instead of scanned as listed; every other entry stays literal. '
+            + 'A wildcard must name a registrable domain, not a deeper name and not a public '
+            + 'suffix. Listing the BARE domain alongside a wildcard ("example.com" next to '
+            + '"*.example.com") also puts the apex itself in scope; a wildcard on its own '
+            + 'scans only what enumeration discovers beneath it. That is the same control '
+            + 'the project form calls "Root" - there is no separate flag, the list is the '
+            + 'whole interface. Scope is fixed at creation on this surface: the project form '
+            + 'can edit the list later, update_project cannot.'),
         subdomainList: z.array(z.string().max(253)).max(5000).optional()
           .describe('Hosts seeded in addition to whatever discovery finds.'),
         engagementIdentityHeader: z.string().max(400).optional()
