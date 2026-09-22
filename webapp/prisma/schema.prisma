@@ -50,7 +50,9 @@ model UserLlmProvider {
   userId          String   @map("user_id")
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // "openai" | "anthropic" | "openrouter" | "bedrock" | "openai_compatible"
+  // "openai" | "anthropic" | "openrouter" | "bedrock" | "openai_compatible" | "nvidia" ...
+  // nvidia rows: apiKey + baseUrl (default https://integrate.api.nvidia.com/v1)
+  // + modelIdentifier; resolution reuses the OpenAI-compatible fields.
   providerType    String   @map("provider_type")
   name            String
 

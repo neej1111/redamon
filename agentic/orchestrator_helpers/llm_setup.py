@@ -79,6 +79,8 @@ def parse_model_provider(model_name: str) -> tuple[str, str]:
       - "qwen/<model>"        → ("qwen", "<model>")
       - "xai/<model>"         → ("xai", "<model>")
       - "mistral/<model>"     → ("mistral", "<model>")
+      - "nvidia/<model>"      → ("nvidia", "<model>")
+      - "arliai/<model>"      → ("arliai", "<model>")
       - "claude-*"            → ("anthropic", "claude-*")
       - anything else         → ("openai", "<model>")
 
@@ -107,6 +109,10 @@ def parse_model_provider(model_name: str) -> tuple[str, str]:
         return ("xai", model_name[len("xai/"):])
     elif model_name.startswith("mistral/"):
         return ("mistral", model_name[len("mistral/"):])
+    elif model_name.startswith("nvidia/"):
+        return ("nvidia", model_name[len("nvidia/"):])
+    elif model_name.startswith("arliai/"):
+        return ("arliai", model_name[len("arliai/"):])
     elif model_name.startswith("claude-"):
         return ("anthropic", model_name)
     else:
@@ -126,6 +132,8 @@ def setup_llm(
     qwen_api_key: str | None = None,
     xai_api_key: str | None = None,
     mistral_api_key: str | None = None,
+    nvidia_api_key: str | None = None,
+    arliai_api_key: str | None = None,
     openai_compat_api_key: str | None = None,
     openai_compat_base_url: str | None = None,
     aws_access_key_id: str | None = None,
@@ -353,6 +361,34 @@ def setup_llm(
             api_key=mistral_api_key,
             base_url="https://api.mistral.ai/v1",
             temperature=0,
+        )
+
+    elif provider == "nvidia":
+        if not nvidia_api_key:
+            raise ValueError(
+                f"NVIDIA NIM API key is required for model '{model_name}'"
+            )
+        llm = ChatOpenAI(
+            model=api_model,
+            api_key=nvidia_api_key,
+            base_url="https://integrate.api.nvidia.com/v1",
+            temperature=0,
+        )
+
+    elif provider == "arliai":
+        if not arliai_api_key:
+            raise ValueError(
+                f"Arliai API key is required for model '{model_name}'"
+            )
+        # Arliai serves community fine-tunes on Aphrodite-Engine/vLLM behind an
+        # OpenAI-compatible surface (https://api.arliai.com/v1). Some hosted
+        # merges (e.g. the Gemma distills) reject temperature=0 with a permanent
+        # 400; omit temperature and let each model use its own default rather
+        # than crash the model — llm_retry self-heals the rest.
+        llm = ChatOpenAI(
+            model=api_model,
+            api_key=arliai_api_key,
+            base_url="https://api.arliai.com/v1",
         )
 
     elif provider == "bedrock":

@@ -350,6 +350,100 @@ async def fetch_qwen_models(api_key: str = "") -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# NVIDIA NIM (integrate.api.nvidia.com)
+# ---------------------------------------------------------------------------
+async def fetch_nvidia_models(api_key: str = "") -> list[dict]:
+    """Enumerate the NVIDIA NIM catalogue at integrate.api.nvidia.com.
+
+    Uses a dedicated loader (not _fetch_openai_compat_models) because the NIM
+    /models response does not carry context lengths, and we want a stable
+    id_prefix + description and to skip models that don't expose chat
+    completions.
+    """
+    if not api_key:
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                "https://integrate.api.nvidia.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except Exception as e:
+        logger.warning(f"nvidia /models unreachable: {type(e).__name__}: {e}")
+        return []
+
+    models = []
+    for m in data:
+        mid = m.get("id", "")
+        if not mid:
+            continue
+        # NIM lists embedding, rerank and vision models alongside chat models;
+        # drop anything that is plainly not a chat/LLM endpoint.
+        low = mid.lower()
+        if any(tok in low for tok in ("embed", "rerank", "retriever", "guard",
+                                      "reward", "nv-rerank", "nsql")):
+            continue
+        models.append(_model(
+            id=f"nvidia/{mid}",
+            name=mid,
+            description="NVIDIA NIM",
+        ))
+    models.sort(key=lambda m: m["id"], reverse=True)
+    return models
+
+
+# ---------------------------------------------------------------------------
+# Arliai (api.arliai.com)
+# ---------------------------------------------------------------------------
+async def fetch_arliai_models(api_key: str = "") -> list[dict]:
+    """Enumerate the Arliai catalogue at api.arliai.com/v1.
+
+    Arliai serves community fine-tunes on Aphrodite-Engine/vLLM behind an
+    OpenAI-compatible /models endpoint. Uses a dedicated loader (not
+    _fetch_openai_compat_models) because the catalogue mixes plain-string chat
+    ids with a couple of non-chat entries (a safety-tuned 'AssGuard' merge and
+    an SDFT RP variant) and a 'Fastest' alias whose context_length is 0, and we
+    want a stable id_prefix + description for the frontend.
+    """
+    if not api_key:
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                "https://api.arliai.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except Exception as e:
+        logger.warning(f"arliai /models unreachable: {type(e).__name__}: {e}")
+        return []
+
+    # Non-chat catalogue entries (text-generation only elsewhere). Anchored on
+    # their exact ids, so a future unrelated '...-guard' merge is not dropped.
+    exclude_ids = {"gemma-4-31b-assguard", "gemma-4-31b-sdft-heretic-rp"}
+
+    models = []
+    for m in data:
+        mid = m.get("id", "")
+        if not mid or mid.lower() in exclude_ids:
+            continue
+        ctx = m.get("context_length")
+        models.append(_model(
+            id=f"arliai/{mid}",
+            name=mid,
+            context_length=ctx or None,
+            description="Arliai",
+        ))
+    models.sort(key=lambda m: m["id"], reverse=True)
+    return models
+
+
+# ---------------------------------------------------------------------------
 # Google Gemini (AI Studio)
 # ---------------------------------------------------------------------------
 async def fetch_gemini_models(api_key: str = "") -> list[dict]:
@@ -547,6 +641,8 @@ async def fetch_all_models(
             tasks_db[f"xAI Grok ({pname})"] = fetch_xai_models(api_key=p.get("apiKey", ""))
         elif ptype == "mistral":
             tasks_db[f"Mistral AI ({pname})"] = fetch_mistral_models(api_key=p.get("apiKey", ""))
+        elif ptype == "nvidia":
+            tasks_db[f"NVIDIA NIM ({pname})"] = fetch_nvidia_models(api_key=p.get("apiKey", ""))
         elif ptype == "bedrock":
             tasks_db[f"AWS Bedrock ({pname})"] = fetch_bedrock_models(
                 region=p.get("awsRegion", "us-east-1"),

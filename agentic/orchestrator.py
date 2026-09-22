@@ -384,6 +384,8 @@ class AgentOrchestrator:
         qwen_p = _resolve_provider_key(user_providers, "qwen")
         xai_p = _resolve_provider_key(user_providers, "xai")
         mistral_p = _resolve_provider_key(user_providers, "mistral")
+        nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+        arliai_p = _resolve_provider_key(user_providers, "arliai")
 
         self.llm = setup_llm(
             self.model_name,
@@ -397,6 +399,8 @@ class AgentOrchestrator:
             qwen_api_key=(qwen_p or {}).get("apiKey"),
             xai_api_key=(xai_p or {}).get("apiKey"),
             mistral_api_key=(mistral_p or {}).get("apiKey"),
+            nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+            arliai_api_key=(arliai_p or {}).get("apiKey"),
             aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
             aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
             aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
