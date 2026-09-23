@@ -368,6 +368,17 @@ def setup_llm(
             raise ValueError(
                 f"NVIDIA NIM API key is required for model '{model_name}'"
             )
+        # NIM's chat/completions requires the FULL catalogue id (org-prefixed):
+        # bare 'nemotron-3-ultra-550b-a55b' 404s while
+        # 'nvidia/nemotron-3-ultra-550b-a55b' returns 200 (contract changed
+        # 2026-09-22; bare ids were accepted before). The parse contract hands
+        # us the id with the routing prefix stripped, so a picker-stored
+        # 'nvidia/meta/llama-...' arrives here already carrying its catalogue
+        # prefix — pass it through untouched. A bare id can only come from a
+        # row whose model_identifier predates the prefix convention (an
+        # nvidia-org model), so re-prefix those with 'nvidia/'.
+        if "/" not in api_model:
+            api_model = f"nvidia/{api_model}"
         llm = ChatOpenAI(
             model=api_model,
             api_key=nvidia_api_key,

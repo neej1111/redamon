@@ -124,11 +124,26 @@ class TestSetupLlmNvidia(unittest.TestCase):
         )
         mock_chat.assert_called_once()
         kwargs = mock_chat.call_args.kwargs
-        self.assertEqual(kwargs.get("model"), "nemotron-3-super-120b-a12b")
+        # NIM's chat/completions requires the FULL catalogue id: the routing
+        # prefix stripped by parse_model_provider carried the org namespace
+        # ('nvidia/...'), so it must reach the API untouched.
+        self.assertEqual(kwargs.get("model"), "nvidia/nemotron-3-super-120b-a12b")
         self.assertEqual(kwargs.get("api_key"), "nvapi-test")
         self.assertEqual(kwargs.get("base_url"), "https://integrate.api.nvidia.com/v1")
         self.assertEqual(kwargs.get("temperature"), 0)
         self.assertIs(llm, mock_chat.return_value)
+
+    @patch("orchestrator_helpers.llm_setup.ChatOpenAI")
+    def test_bare_id_is_re_prefixed_for_api(self, mock_chat):
+        """A bare model_identifier (pre-prefix-convention row) must be re-prefixed."""
+        mock_chat.return_value = MagicMock()
+        setup_llm(
+            "nvidia/nemotron-3-super-120b-a12b",
+            nvidia_api_key="nvapi-test",
+        )
+        kwargs = mock_chat.call_args.kwargs
+        self.assertNotEqual(kwargs.get("model"), "nemotron-3-super-120b-a12b")
+        self.assertTrue(kwargs.get("model").startswith("nvidia/"))
 
     @patch("orchestrator_helpers.llm_setup.ChatOpenAI")
     def test_other_provider_unaffected_when_nvidia_key_passed(self, mock_chat):
