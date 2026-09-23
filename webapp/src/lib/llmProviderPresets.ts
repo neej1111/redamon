@@ -2,7 +2,7 @@ import type { ComponentType, SVGProps } from 'react'
 import { SiOpenai, SiAnthropic, SiGooglegemini } from 'react-icons/si'
 import { FaAws } from 'react-icons/fa6'
 import { LuSettings, LuSparkles } from 'react-icons/lu'
-import { SiDeepseek, SiOpenrouter, SiMoonshot, SiQwen, SiXai, SiMistral } from '@/components/icons/ProviderBrandIcons'
+import { SiDeepseek, SiOpenrouter, SiMoonshot, SiQwen, SiXai, SiMistral, SiNvidia, SiArliai } from '@/components/icons/ProviderBrandIcons'
 
 /**
  * Presets for OpenAI-Compatible LLM provider base URLs.
