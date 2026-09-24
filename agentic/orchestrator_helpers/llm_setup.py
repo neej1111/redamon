@@ -509,6 +509,13 @@ def apply_project_settings(orchestrator, project_id: str) -> None:
         qwen_p = _resolve_provider_key(user_providers, "qwen")
         xai_p = _resolve_provider_key(user_providers, "xai")
         mistral_p = _resolve_provider_key(user_providers, "mistral")
+        # Missing-key regression (2026-09-24): call sites that resolve keys from
+        # user providers must pass nvidia/arliai -- this body is what
+        # apply_project_settings uses on every project load, so a session pinned
+        # to either provider previously fell into the ValueError even with the
+        # key stored in user_llm_providers.
+        nvidia_p = _resolve_provider_key(user_providers, "nvidia")
+        arliai_p = _resolve_provider_key(user_providers, "arliai")
 
         try:
             orchestrator.llm = setup_llm(
@@ -523,6 +530,8 @@ def apply_project_settings(orchestrator, project_id: str) -> None:
                 qwen_api_key=(qwen_p or {}).get("apiKey"),
                 xai_api_key=(xai_p or {}).get("apiKey"),
                 mistral_api_key=(mistral_p or {}).get("apiKey"),
+                nvidia_api_key=(nvidia_p or {}).get("apiKey"),
+                arliai_api_key=(arliai_p or {}).get("apiKey"),
                 aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
                 aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
                 aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
